@@ -78,7 +78,7 @@ claude plugin marketplace add zhishouhuameiwan/claude-feishu-remote
 claude plugin install feishu-remote@claude-feishu-remote
 ```
 
-没法访问 GitHub 的话，可以把仓库下载到本地，解压到一个长期存放的目录（插件直接在这个目录里运行，以后不要删），然后用目录路径代替 `zhishouhuameiwan/claude-feishu-remote`。
+第一条命令一直卡着不动的话，见下文“排错”。没法访问 GitHub 的话，可以把仓库下载到本地，解压到一个长期存放的目录（插件直接在这个目录里运行，以后不要删），然后用目录路径代替 `zhishouhuameiwan/claude-feishu-remote`。
 
 ### 4. 运行安装脚本
 
@@ -148,6 +148,7 @@ claude plugin marketplace remove claude-feishu-remote
 | 绑定时发了验证码没反应 | 检查三点：应用开通了 `im:message.p2p_msg:readonly`；事件订阅里有 `im.message.receive_v1`；改完已经重新发布版本。验证码 30 分钟内有效，连续发错 5 次会作废，重新运行 `setup.ps1` 即可。 |
 | 安装脚本提示 listener 2 分钟内没有启动 | 第一次启动时，杀毒软件扫描新文件可能很慢。稍等一会儿再运行一次 `setup.ps1`。 |
 | 两台电脑用了同一个应用 | 两边会互相抢点击，必须给每台电脑各建一个应用。 |
+| `claude plugin marketplace add zhishouhuameiwan/claude-feishu-remote` 一直卡着不动，或者重试时报 `EBUSY` | 这种简写会通过 SSH 克隆仓库，有的网络环境下会卡住。先按 Ctrl+C 退出，在任务管理器里结束卡住的 `git.exe` 和 `ssh.exe`，再删掉报错里提到的临时目录（`%USERPROFILE%\.claude\plugins\marketplaces\` 下以 `..clone` 结尾的那个），然后改用完整的 HTTPS 地址添加：`claude plugin marketplace add https://github.com/zhishouhuameiwan/claude-feishu-remote.git`。 |
 
 ## 开发
 

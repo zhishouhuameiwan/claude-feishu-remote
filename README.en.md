@@ -79,7 +79,7 @@ claude plugin marketplace add zhishouhuameiwan/claude-feishu-remote
 claude plugin install feishu-remote@claude-feishu-remote
 ```
 
-Without access to GitHub, download the repository, unzip it to a permanent folder (the plugin runs from that folder, so do not delete it later) and use the folder path instead of `zhishouhuameiwan/claude-feishu-remote`.
+If the first command hangs, see "Troubleshooting" below. Without access to GitHub, download the repository, unzip it to a permanent folder (the plugin runs from that folder, so do not delete it later) and use the folder path instead of `zhishouhuameiwan/claude-feishu-remote`.
 
 ### 4. Run the setup script
 
@@ -149,6 +149,7 @@ claude plugin marketplace remove claude-feishu-remote
 | The binding code gets no reaction | Check that the app has `im:message.p2p_msg:readonly`, that the event subscription includes `im.message.receive_v1`, and that you published a new version after the changes. The code is valid for 30 minutes and is voided after 5 wrong attempts; run `setup.ps1` again for a new one. |
 | Setup says the listener did not start within 2 minutes | On a first start, antivirus scanning of the new files can be slow. Wait a moment and run `setup.ps1` again. |
 | Two computers use the same app | They steal each other's taps. Give every computer its own app. |
+| `claude plugin marketplace add zhishouhuameiwan/claude-feishu-remote` hangs, or a retry fails with `EBUSY` | The `owner/repo` shorthand clones the repository over SSH, which can stall on some networks. Press Ctrl+C, end the stuck `git.exe` and `ssh.exe` in Task Manager, delete the temporary folder named in the error (the one ending in `..clone` under `%USERPROFILE%\.claude\plugins\marketplaces\`), then add the marketplace by its full HTTPS URL: `claude plugin marketplace add https://github.com/zhishouhuameiwan/claude-feishu-remote.git`. |
 
 ## Development
 
