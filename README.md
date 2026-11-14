@@ -1,0 +1,172 @@
+# claude-feishu-remote
+
+**在飞书上审批和回答 Claude Code 的提问。** 人不在电脑前时，Claude Code 等你点头的事会推送到飞书，点一下卡片就能远程作答，Claude 当场接着干。
+
+> Approve Claude Code permission prompts and answer its questions from Feishu (Lark) cards while you are away from your Windows PC. Packaged as a Claude Code plugin; replies go back through Claude Code's own answer channel, so they count as your own input.
+
+## 能做什么
+
+| Claude Code 里发生的事 | 飞书上收到的 | 你能做的 |
+|---|---|---|
+| 审批弹窗（执行命令、改文件、调用工具…） | 审批卡片，列出工具和完整参数 | 允许 / 拒绝 / 拒绝并写明原因 |
+| 提问弹窗（AskUserQuestion） | 提问卡片：单选题是一排按钮，多题、多选用表单 | 选选项，或在“其他回答”里自己写 |
+| 桌面版“下一步”框里需要你拍板的问题 | 自动改成提问卡片（见下文“工作原理”） | 同上 |
+| 计划等批准、MCP 弹窗要填信息、会话出错 | 文字提醒 | 回电脑处理 |
+
+- 你在电脑上先答了，飞书卡片会自动变成“已在电脑上处理”，不会重复作答。
+- 只认你绑定的那一个飞书账号：别人点卡片无效。
+- 审批卡片会显示完整参数；参数太长被截断时不提供“允许”，避免你批准没看全的操作。
+- 没做任何配置时插件什么都不做：装上但不运行安装脚本，Claude Code 的行为和没装一样。
+
+## 工作原理
+
+```mermaid
+flowchart LR
+    subgraph PC[你的 Windows 电脑]
+        CC[Claude Code 会话] -- 钩子 --> H[插件钩子脚本]
+        H -- 等待回答 --> R[(数据目录<br/>replies/)]
+        L[listener 常驻进程] -- 写入回答 --> R
+    end
+    H -- 发卡片 --> F[飞书开放平台]
+    F -- 卡片推送 --> U[你的飞书]
+    U -- 点卡片 --> F
+    F -- 长连接回调 --> L
+```
+
+- **钩子**：插件在 Claude Code 的 `PermissionRequest`、`PreToolUse`、`Notification` 等事件上挂了钩子。需要你作答时，钩子发出飞书卡片，然后等回答。
+- **listener**：一个常驻的小进程，通过飞书的长连接接收卡片点击，把答案交给正在等待的钩子。它由 Windows 计划任务在登录时启动，之后每 5 分钟检查一次，断了会自己恢复。不需要公网服务器，也不用开端口。
+- **答案怎么回到 Claude**：审批的“允许 / 拒绝”和提问弹窗的答案，都通过钩子的标准返回值交还给 Claude Code，走的是它自己的答题通道，和你在电脑上点完全一样。所以 Claude 会把飞书上的回答当成你本人的输入，直接照做。
+- **为什么要把“下一步”框改成提问弹窗**：外部程序只能以“后台通知”的形式把“下一步”框的回答送进会话，Claude Code 会把这类通知标成“不是用户输入，不能当作批准”。这是 Claude Code 有意设计的防伪造保护，绕不开。所以插件会拦下带提问的阻塞“下一步”框，让 Claude 改用提问弹窗（AskUserQuestion）重新问一次，你在飞书上的回答就能算数。插件还会在每个会话开头告诉 Claude 这条规则。
+
+## 使用前须知
+
+- **只支持 Windows 10/11**。
+- **一台电脑要用一个独立的飞书应用。** 飞书长连接不支持广播：同一个应用同时有两台电脑连着，每次点击只会随机送到其中一台。同一个人有两台电脑，也要建两个应用。
+- **安全**：谁掌握了你绑定的飞书账号，谁就能在飞书上批准这台电脑上的操作。只绑定你自己的账号，应用的可用范围也只加你自己。凭据只保存在本机的 `%LOCALAPPDATA%\FeishuRemote\config.json`。
+- 你在电脑上直接说也不能让 Claude 做的事（例如替你输入密码），通过飞书说也不行。
+
+## 安装
+
+### 1. 准备
+
+- Claude Code（桌面版或命令行版），并且能在终端里运行 `claude` 命令。
+- Python 3.10 或更新版本：从 <https://www.python.org> 安装，勾选 “Add python.exe to PATH”。在新开的 PowerShell 里运行 `python --version` 能看到版本号就行。
+
+### 2. 在飞书开放平台建应用
+
+打开 <https://open.feishu.cn/app>：
+
+1. **创建企业自建应用**，名称随意（例如“我的 Claude 助手”）。
+2. **添加应用能力 → 机器人**。
+3. **权限管理**，开通下面三个权限：
+   - `im:message:send_as_bot`：以应用的身份发消息
+   - `im:message:update`：更新消息（卡片答完后要改成“已处理”）
+   - `im:message.p2p_msg:readonly`：读取用户发给机器人的单聊消息（绑定账号时要用）
+4. **版本管理与发布 → 创建版本**，可用范围只选你自己，然后发布。企业设置要求管理员审核的话，要等审核通过。可用范围一定只放你自己：能和机器人单聊的人，都能在你绑定时发错验证码，把它作废。
+5. 在 **凭证与基础信息** 里记下 App ID 和 App Secret，下一步要用。
+
+“事件与回调”先不用配：飞书要求本机 listener 在线时才能保存长连接订阅，安装脚本会在合适的时候提示你。
+
+### 3. 安装插件
+
+在终端里运行：
+
+```powershell
+claude plugin marketplace add zhishouhuameiwan/claude-feishu-remote
+claude plugin install feishu-remote@claude-feishu-remote
+```
+
+没法访问 GitHub 的话，可以把仓库下载到本地，解压到一个长期存放的目录（插件直接在这个目录里运行，以后不要删），然后用目录路径代替 `zhishouhuameiwan/claude-feishu-remote`。
+
+### 4. 运行安装脚本
+
+在 PowerShell 里运行（不需要管理员权限）：
+
+```powershell
+$list = (claude plugin list --json | Out-String) | ConvertFrom-Json
+$plugin = @($list) | Where-Object { $_.id -eq 'feishu-remote@claude-feishu-remote' } | Select-Object -First 1
+$dir = if ($plugin.readFromFolder) { $plugin.readFromFolder } else { $plugin.installPath }
+powershell -ExecutionPolicy Bypass -File (Join-Path $dir 'setup.ps1')
+```
+
+上面这几行用来找到插件的安装目录（`$dir`），后面运行 `uninstall.ps1` 和 `notify_switch.py` 时说的“插件目录”也是它。下载到本地安装的，插件目录就是 `<本地目录>\plugins\feishu-remote`。
+
+脚本会依次完成：
+
+1. **检查 Python**。
+2. **准备 listener 环境**：在 `%LOCALAPPDATA%\FeishuRemote` 建一个独立的 Python 环境，装好 lark-oapi 并预加载。第一次预加载可能要一两分钟。
+3. **填写凭据**：输入 App ID 和 App Secret，脚本会先向飞书验证一次再保存。输入的 Secret 不会显示在屏幕上，也不会出现在命令行参数里。
+4. **启动 listener**：注册计划任务 “Feishu Remote Listener”，登录时自动启动，之后每 5 分钟检查一次。
+5. **暂停，等你配置飞书后台的“事件与回调”**：
+   - 事件配置：订阅方式选“使用长连接接收事件”，添加事件 `im.message.receive_v1`（接收消息）。
+   - 回调配置：订阅方式选“使用长连接接收回调”，添加回调 `card.action.trigger`（卡片回传交互）。
+   - 再创建一个版本并发布。改过权限或订阅，都要重新发布。
+
+   配好后回到 PowerShell 按回车。
+6. **绑定账号**：屏幕上会显示 8 位验证码。在飞书里找到你的机器人，打开单聊，把验证码原样发过去。看到“绑定成功”就好了，飞书里也会收到一条确认消息。
+
+### 5. 开始用
+
+新开一个 Claude Code 会话。已经开着的会话，包括绑定前打开的，都要重新打开。之后 Claude 等你审批或回答时，飞书上就会收到卡片。
+
+## 日常使用
+
+- **暂时不想收提醒**：运行 `python <插件目录>\scripts\notify_switch.py off`，恢复时改成 `on`。
+- **换一个飞书账号接收**：运行 `setup.ps1 -Rebind`。
+- **换一个飞书应用**：运行 `setup.ps1 -Reconfigure`。换应用后原来的绑定会自动清除，需要重新绑定。
+- 一台电脑只装一份插件。不要再用 `--plugin-dir` 额外加载一份副本，两份同时存在会让 listener 来回重启。
+
+## 更新
+
+```powershell
+claude plugin marketplace update claude-feishu-remote
+claude plugin update feishu-remote@claude-feishu-remote
+```
+
+然后按“安装”第 4 步的方法重新运行一次 `setup.ps1`：它会更新 lark-oapi，并用新代码重启 listener，已保存的凭据和绑定都会保留。最后重开 Claude Code 会话。
+
+本地目录安装的：把新版本覆盖解压到原来的目录，重新运行 `setup.ps1`，再重开会话。
+
+## 卸载
+
+```powershell
+powershell -ExecutionPolicy Bypass -File <插件目录>\uninstall.ps1
+claude plugin uninstall feishu-remote@claude-feishu-remote
+claude plugin marketplace remove claude-feishu-remote
+```
+
+`uninstall.ps1` 会删除计划任务、停止 listener，并删除数据目录（凭据、绑定信息、日志）。加 `-KeepData` 则保留数据目录，以后重装就不用再填。
+
+## 排错
+
+| 现象 | 先看什么 |
+|---|---|
+| 飞书上点卡片，提示“回调服务当前未在线” | listener 没在运行。打开“任务计划程序”手动运行 “Feishu Remote Listener”，或者重新运行 `setup.ps1`。日志在 `%LOCALAPPDATA%\FeishuRemote\listener.log`。 |
+| 完全收不到卡片 | 看 `%LOCALAPPDATA%\FeishuRemote\hooks.log`。如果有 `WinError 10061`，通常是系统代理开着但代理程序没在运行。 |
+| 绑定时发了验证码没反应 | 检查三点：应用开通了 `im:message.p2p_msg:readonly`；事件订阅里有 `im.message.receive_v1`；改完已经重新发布版本。验证码 30 分钟内有效，连续发错 5 次会作废，重新运行 `setup.ps1` 即可。 |
+| 安装脚本提示 listener 2 分钟内没有启动 | 第一次启动时，杀毒软件扫描新文件可能很慢。稍等一会儿再运行一次 `setup.ps1`。 |
+| 两台电脑用了同一个应用 | 两边会互相抢点击，必须给每台电脑各建一个应用。 |
+
+## 开发
+
+```
+.claude-plugin/marketplace.json      插件市场清单
+plugins/feishu-remote/
+  .claude-plugin/plugin.json         插件清单
+  hooks/hooks.json                   钩子注册
+  scripts/                           钩子、listener、卡片、绑定等脚本（钩子只用 Python 标准库）
+  setup.ps1 / uninstall.ps1          安装与卸载（兼容 Windows PowerShell 5.1）
+  tests/                             离线测试
+```
+
+离线测试不会向飞书发送任何内容，每套测试都在自己的临时数据目录里运行，不会碰到正在运行的 listener 和真实配置：
+
+```powershell
+# 需要一个装了 lark-oapi 的 Python；运行过 setup.ps1 的话会自动使用它建的环境
+$env:FEISHU_TEST_PYTHON = 'C:\path\to\python-with-lark-oapi.exe'
+powershell -ExecutionPolicy Bypass -File plugins\feishu-remote\tests\run_tests.ps1
+```
+
+## 许可证
+
+[MIT](LICENSE)

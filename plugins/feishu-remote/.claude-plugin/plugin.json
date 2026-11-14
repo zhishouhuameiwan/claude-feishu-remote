@@ -1,0 +1,8 @@
+{
+  "name": "feishu-remote",
+  "version": "1.0.0",
+  "description": "在飞书上审批和回答 Claude Code 的提问：审批弹窗、AskUserQuestion、需要拍板的“下一步”框都会推送飞书卡片，点卡片就能远程作答（仅 Windows）。",
+  "author": {
+    "name": "feishu-remote"
+  }
+}

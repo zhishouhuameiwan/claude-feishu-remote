@@ -1,0 +1,12 @@
+{
+  "name": "claude-feishu-remote",
+  "owner": { "name": "zhishouhuameiwan" },
+  "description": "飞书远程回复 Claude Code",
+  "plugins": [
+    {
+      "name": "feishu-remote",
+      "source": "./plugins/feishu-remote",
+      "description": "在飞书上审批和回答 Claude Code 的提问（仅 Windows）。"
+    }
+  ]
+}
