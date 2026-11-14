@@ -1,8 +1,10 @@
+[English](README.en.md) | **中文**
+
 # claude-feishu-remote
 
 **在飞书上审批和回答 Claude Code 的提问。** 人不在电脑前时，Claude Code 等你点头的事会推送到飞书，点一下卡片就能远程作答，Claude 当场接着干。
 
-> Approve Claude Code permission prompts and answer its questions from Feishu (Lark) cards while you are away from your Windows PC. Packaged as a Claude Code plugin; replies go back through Claude Code's own answer channel, so they count as your own input.
+> 适用于 **国内版飞书** 和 **Windows**。国际版 Lark（open.larksuite.com）暂不支持：代码里用的是飞书国内的接口地址。
 
 ## 能做什么
 
@@ -40,7 +42,7 @@ flowchart LR
 
 ## 使用前须知
 
-- **只支持 Windows 10/11**。
+- **只支持 Windows 10/11 和国内版飞书**，国际版 Lark 暂不支持。
 - **一台电脑要用一个独立的飞书应用。** 飞书长连接不支持广播：同一个应用同时有两台电脑连着，每次点击只会随机送到其中一台。同一个人有两台电脑，也要建两个应用。
 - **安全**：谁掌握了你绑定的飞书账号，谁就能在飞书上批准这台电脑上的操作。只绑定你自己的账号，应用的可用范围也只加你自己。凭据只保存在本机的 `%LOCALAPPDATA%\FeishuRemote\config.json`。
 - 你在电脑上直接说也不能让 Claude 做的事（例如替你输入密码），通过飞书说也不行。
