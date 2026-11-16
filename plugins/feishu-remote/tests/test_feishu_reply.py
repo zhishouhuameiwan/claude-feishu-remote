@@ -167,10 +167,12 @@ check(any(x["kind"] == "text" and "下一步做哪个？" in x["body"] for x in 
 print("== binding: the one-time code sent to the bot in a private chat")
 
 
-def message(text, open_id="ou_new", chat_id="oc_new", chat_type="p2p", message_type="text", sender_type="user"):
+def message(text, open_id="ou_new", chat_id="oc_new", chat_type="p2p", message_type="text", sender_type="user",
+            parent_id=None, root_id=None):
     content = json.dumps({"text": text}, ensure_ascii=False)
     event = SimpleNamespace(
-        message=SimpleNamespace(chat_type=chat_type, message_type=message_type, content=content, chat_id=chat_id),
+        message=SimpleNamespace(chat_type=chat_type, message_type=message_type, content=content, chat_id=chat_id,
+                                parent_id=parent_id, root_id=root_id),
         sender=SimpleNamespace(sender_type=sender_type, sender_id=SimpleNamespace(open_id=open_id)))
     L.on_message(SimpleNamespace(event=event))
 
@@ -401,6 +403,78 @@ check("现在：运行超过 5 分钟" in REPLIES[0][2], "  '通知' alone shows
 REPLIES.clear()
 message("通知 1", open_id="ou_evil")
 check(not REPLIES and FAKE_CONFIG.get("notify_after_minutes") == "5", "  another account cannot change it")
+
+print("== stopping a session from Feishu")
+saved_label = L.session_list.session_label
+L.session_list.session_label = lambda sid: ("修测试", True)
+r = view_click("ou_me", {"kind": "stop", "sid": "x-1"})
+check(r["toast"]["type"] == "success" and "下一次调用工具" in r["toast"]["content"] and RB.stop_requested("x-1"),
+      f"  停止 on a busy session -> a stop request: {r['toast']['content']!r}")
+RB.clear_stop("x-1")
+r = view_click("ou_evil", {"kind": "stop", "sid": "x-1"})
+check(r["toast"]["type"] == "error" and not RB.stop_requested("x-1"), "  another account cannot stop it")
+r = view_click("ou_me", {"kind": "stop", "sid": "../x"})
+check(r["toast"]["type"] == "error", "  unsafe id refused")
+RB.register_command_waiter("x-idle", {"waiter_pid": os.getpid(), "waiter_created": RB.process_created(os.getpid())})
+r = view_click("ou_me", {"kind": "stop", "sid": "x-idle"})
+check(r["toast"]["type"] == "info" and "空闲" in r["toast"]["content"] and not RB.stop_requested("x-idle"),
+      "  an idle session (a stale card) -> nothing to stop, no request left for a later turn")
+RB.create_request("rstop0001", {"type": "permission", "session_id": "x-2", "message_id": "om_perm",
+                                "info": {"header": "h", "tool": "Bash", "params": "命令：rm"},
+                                "waiter_pid": os.getpid(), "waiter_created": RB.process_created(os.getpid())},
+                  update_session=False)
+UPDATES.clear()
+r = view_click("ou_me", {"kind": "stop", "sid": "x-2"})
+check((RB.get_outcome("rstop0001") or {}).get("choice") == "stop" and RB.stop_requested("x-2"),
+      "  a session waiting on an approval card -> the card is answered 'stop', and a stop request left")
+check("审批" in r["toast"]["content"] and UPDATES and UPDATES[0][0] == "om_perm",
+      f"  ... says so and closes that card: {r['toast']['content']!r}")
+RB.clear_stop("x-2")
+
+print("== plain chat text: the current session, or the session of the message replied to")
+TEXTS = []
+feishu_notify.send_reply_text = lambda title, body: TEXTS.append((title, body)) or "om_receipt"
+RB.set_current(None)
+r = view_click("ou_me", {"kind": "current", "sid": "x-3", "on": True})
+check(r["toast"]["type"] == "success" and RB.current_session() == "x-3", "  设为当前会话")
+r = view_click("ou_evil", {"kind": "current", "sid": "x-9", "on": True})
+check(r["toast"]["type"] == "error" and RB.current_session() == "x-3", "  another account cannot change it")
+message("把测试也跑一遍", open_id="ou_me")
+check([c["text"] for c in RB.take_commands("x-3")] == ["把测试也跑一遍"] and "「修测试」" in TEXTS[-1][1]
+      and "30 分钟" in TEXTS[-1][1], f"  text -> queued for the current session, the receipt names it: {TEXTS[-1:]}")
+check(RB.session_of_message("om_receipt") == "x-3", "  replying to the receipt goes to the same session")
+REPLIES.clear()
+message("会话", open_id="ou_me")
+check(REPLIES == [("card", {"fake": "list"})] and RB.queued_commands("x-3") == 0,
+      "  a command word is still a command, not text for the session")
+message("通知 5", open_id="ou_me")
+check(RB.queued_commands("x-3") == 0, "  ... '通知 5' too")
+RB.remember_message("om_card4", "x-4")
+message("这条是回复卡片的", open_id="ou_me", parent_id="om_card4", root_id="om_card4")
+check([c["text"] for c in RB.take_commands("x-4")] == ["这条是回复卡片的"] and RB.queued_commands("x-3") == 0,
+      "  a reply to a session's message goes to that session, not the current one")
+message("会话", open_id="ou_me", parent_id="om_card4")
+check([c["text"] for c in RB.take_commands("x-4")] == ["会话"],
+      "  in a reply, even a command word is text for that session")
+message("长" * 3000, open_id="ou_me")
+check(len(RB.take_commands("x-3")[0]["text"]) == 1000 and "只发出了前 1000 字" in TEXTS[-1][1],
+      "  capped at 1000 characters, and the receipt says so")
+message("别人发的", open_id="ou_evil")
+check(RB.queued_commands("x-3") == 0, "  another account's text is ignored")
+r = view_click("ou_me", {"kind": "current", "sid": "x-3", "on": False})
+check(RB.current_session() is None, "  取消当前会话")
+TEXTS.clear()
+message("你好", open_id="ou_me")
+check(RB.queued_commands("x-3") == 0 and TEXTS and "没有“你好”这个命令" in TEXTS[0][1]
+      and "当前会话" in TEXTS[0][1], "  no current session -> help, which explains how to reach a session")
+message("没记录的回复", open_id="ou_me", parent_id="om_unknown")
+check(RB.queued_commands("x-3") == 0 and "没有“没记录的回复”这个命令" in TEXTS[-1][1],
+      "  a reply to a message of no session -> help")
+L.session_list.session_label = lambda sid: ("", False)
+message("给已结束的", open_id="ou_me", parent_id="om_card4")
+check("可能已经结束" in TEXTS[-1][1] and RB.take_commands("x-4"), "  a session claude agents does not list -> says it may have ended")
+L.session_list.session_label = saved_label
+feishu_notify.send_reply_text = lambda title, body: REPLIES.append(("text", title, body))
 L._in_background = saved[3]
 ran = threading.Event()
 L._in_background(ran.set)

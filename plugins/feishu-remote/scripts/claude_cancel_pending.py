@@ -27,6 +27,7 @@ def main() -> None:
     # Recorded even when no request exists yet, so a waiter that registers a
     # moment later sees the user already answered on the computer.
     reply_bridge.mark_prompt(session_id)
+    reply_bridge.clear_stop(session_id)  # a stop from Feishu meant the turn before this prompt
     rid = reply_bridge.session_request(session_id)
     if rid and reply_bridge.get_outcome(rid) is None and reply_bridge.get_request(rid):
         reply_bridge.close_request(rid, "answered_on_computer")

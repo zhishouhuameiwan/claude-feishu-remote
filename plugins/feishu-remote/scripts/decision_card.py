@@ -238,19 +238,29 @@ SESSIONS_HEADER = "Claude Code · 活跃会话"
 def sessions_card(summary: str, entries: list[dict[str, Any]], footer: str) -> dict[str, Any]:
     """Answer to the "会话" command. entries: {"text": one session, already formatted
     and size-bounded by session_list.py, "sid": its id for the "查看" button (None: no
-    button), "send": None or {"sid", "pid"}: a box for sending that session a command}.
-    A button at the end refreshes this card."""
+    button), "stop": offer "停止" (it is working or waiting), "current": it is the
+    current session, "send": None or {"sid", "pid"}: a box for sending that session a
+    command, and "设为当前会话"}. A button at the end refreshes this card."""
     elements = [_text(summary)]
     for index, entry in enumerate(entries):
         elements += [{"tag": "hr"}, _text(entry["text"])]
         if entry.get("sid"):
             elements.append(_button("查看", {"kind": "detail", "sid": entry["sid"], "open": True}, False))
+            if entry.get("stop"):
+                elements.append(_button("停止这一轮", {"kind": "stop", "sid": entry["sid"]}, False))
         if entry.get("send"):
             elements.append(_send_form(index, entry["send"]))
+            elements.append(_current_button(entry["send"]["sid"], bool(entry.get("current")), "list"))
     if footer:
         elements += [{"tag": "hr"}, _text(footer)]
     elements.append(_button("刷新", {"kind": "sessions"}, True))
     return _card(SESSIONS_HEADER, "", "blue", elements)
+
+
+def _current_button(session_id: str, current: bool, card: str) -> dict[str, Any]:
+    """Plain chat text goes to the current session for 30 minutes (feishu_listener.handle_text)."""
+    return _button("取消当前会话" if current else "设为当前会话（直接打字发给它）",
+                   {"kind": "current", "sid": session_id, "on": not current, "card": card}, False)
 
 
 def _send_form(index: int, target: dict[str, Any]) -> dict[str, Any]:
@@ -345,6 +355,8 @@ def detail_card(info: dict[str, Any]) -> dict[str, Any]:
         elements += [{"tag": "hr"}, _text(f"{label}（新的在上）：\n" + "\n".join(info["steps"]))]
     elements.append({"tag": "hr"})
     elements.append(_button("刷新", {"kind": "detail", "sid": sid, "page": 0}, True))
+    if info.get("busy"):
+        elements.append(_button("停止这一轮", {"kind": "stop", "sid": sid}, False))
     if info.get("has_older"):
         elements.append(_button("更早的步骤", {"kind": "detail", "sid": sid, "page": page + 1}, False))
     if page > 0:
@@ -354,6 +366,7 @@ def detail_card(info: dict[str, Any]) -> dict[str, Any]:
     following = bool(info.get("following"))
     elements.append(_button("取消关注" if following else "关注（每轮结束都推送）",
                             {"kind": "follow", "sid": sid, "on": not following}, False))
+    elements.append(_current_button(sid, bool(info.get("current")), "detail"))
     return _card(DETAIL_HEADER, str(info.get("title") or ""), "blue", elements)
 
 

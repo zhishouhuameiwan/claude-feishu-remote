@@ -38,10 +38,10 @@ from feishu_notify import limit_text
 AGENTS_TIMEOUT_SECONDS = 30
 CREATE_NO_WINDOW = 0x08000000  # the listener runs under pythonw: no console window may flash
 TAIL_BYTES = 512 * 1024
-# One card holds at most this many sessions, each with its send box: with every field
-# at its cap an entry takes about 1.9 KB of the 30 KB Feishu accepts. The rest, the
-# least urgent ones, are only counted.
-MAX_ENTRIES = 12
+# One card holds at most this many sessions, each with its buttons and send box: with
+# every field at its cap an entry takes about 2.6 KB of the 30 KB Feishu accepts. The
+# rest, the least urgent ones, are only counted.
+MAX_ENTRIES = 10
 
 # status of a live session; background sessions may carry only state (working / blocked / done / ...).
 STATUS_LABELS = {"waiting": "等你处理", "busy": "工作中", "idle": "空闲", "working": "工作中",
@@ -238,8 +238,11 @@ def build_card(rows: list[dict[str, Any]], now: float) -> dict[str, Any]:
     if len(rows) > len(active):
         notes.append(f"另有 {len(rows) - len(active)} 个空闲会话没有列出：它们收不到指令"
                      "（上一轮结束已超过 12 小时，或是装新版插件之前开的会话）。")
+    current = reply_bridge.current_session()
     entries = [{"text": format_row(row, now), "send": _send_target(row),
-                "sid": row["session_id"] if reply_bridge.valid_id(row["session_id"]) else None}
+                "sid": row["session_id"] if reply_bridge.valid_id(row["session_id"]) else None,
+                "stop": row["listed"] and (row["status"] in URGENCY or bool(row["cards"])),
+                "current": row["session_id"] == current}
                for row in active[:MAX_ENTRIES]]
     if not active:
         entries = [{"text": "现在没有活跃的会话。", "send": None}]
@@ -327,7 +330,8 @@ def detail_info(session_id: str, page: int, now: float) -> dict[str, Any]:
     return {"sid": session_id, "title": title, "summary": summary, "turn": turn, "pending": pending,
             "tasks": [(short(c, 80), s) for c, s in v["tasks"]], "latest_text": limit_text(v["latest_text"], LATEST_CHARS),
             "steps": steps, "page": page, "has_older": len(v["steps"]) > first + len(shown),
-            "following": reply_bridge.following(session_id)}
+            "following": reply_bridge.following(session_id), "busy": busy,
+            "current": reply_bridge.current_session() == session_id}
 
 
 def detail_card(session_id: str, page: int = 0) -> dict[str, Any]:
@@ -337,6 +341,12 @@ def detail_card(session_id: str, page: int = 0) -> dict[str, Any]:
     except (SessionListError, OSError) as exc:
         reason = str(exc) if isinstance(exc, SessionListError) else f"读取会话记录失败（{type(exc).__name__}）。"
         return decision_card.sessions_card(f"查看会话失败：{reason}", [], "")
+
+
+def session_label(session_id: str) -> tuple[str, bool]:
+    """(name, listed by claude agents) for a receipt; ('', False) when it cannot be read."""
+    live, _ = _live_entry(session_id)
+    return str((live or {}).get("name") or ""), live is not None
 
 
 def latest_text_doc(session_id: str) -> Optional[dict[str, Any]]:

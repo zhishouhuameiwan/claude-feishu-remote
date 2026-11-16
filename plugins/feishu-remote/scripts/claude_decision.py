@@ -186,6 +186,7 @@ def main() -> int:
         reply_bridge.close_request(rid, "disabled")
         return 0
     reply_bridge.create_request(rid, {**base, "message_id": message_id}, update_session=False)
+    reply_bridge.remember_message(message_id, session_id)  # a reply to the card goes to this session
 
     outcome = wait_for_outcome(rid, session_id, started_at, parent)
     if outcome.get("kind") == "answer":

@@ -64,19 +64,21 @@ def _reply_doc(payload: dict[str, Any], title: str, header: str, extra: list[str
     return {"header": header, "title": title, "template": "green", "lines": lines + extra, "text": reply}
 
 
-def send_reply_doc(doc: dict[str, Any], as_reply: bool) -> bool:
+def send_reply_doc(doc: dict[str, Any], as_reply: bool, session_id: str) -> bool:
     """First page of the reply; the rest is stored for the card's page buttons.
     as_reply: the user asked for it (a Feishu command, a followed session), so it goes
     out even while notifications are switched off; a long-turn notice follows the switch.
+    Replying to the card in Feishu sends a command to the session.
     False when it was not sent because notifications are off."""
     if not as_reply and not feishu_notify.notifications_enabled():
         return False
     doc_id = reply_bridge.save_doc(doc)
     card = decision_card.paged_card(doc_id, doc, 0)
-    if as_reply:
-        feishu_notify.send_reply_card(card)
-        return True
-    return feishu_notify.send_feishu_card(card) is not None
+    message_id = feishu_notify.send_reply_card(card) if as_reply else feishu_notify.send_feishu_card(card)
+    if message_id is None:
+        return False
+    reply_bridge.remember_message(message_id, session_id)
+    return True
 
 
 def relay_last_reply(payload: dict[str, Any], session_id: str, title: str) -> bool:
@@ -89,7 +91,7 @@ def relay_last_reply(payload: dict[str, Any], session_id: str, title: str) -> bo
         log("[Feishu] typed on the computer since the Feishu command; its reply is not relayed")
         return False
     try:
-        send_reply_doc(_reply_doc(payload, title, "[ok] Claude Code · 飞书指令处理完了", []), as_reply=True)
+        send_reply_doc(_reply_doc(payload, title, "[ok] Claude Code · 飞书指令处理完了", []), True, session_id)
     except Exception as exc:
         log(f"[Feishu] last reply relay failed: {exc}")
     return True
@@ -131,23 +133,12 @@ def notify_done(payload: dict[str, Any], session_id: str, title: str) -> None:
         if seconds is not None else []
     extra.append("（你关注了这个会话：它每轮结束都会推送）" if followed
                  else f"（运行超过 {limit / 60:g} 分钟的一轮结束时推送；发“通知”可以调整或关闭）")
-    if send_reply_doc(_reply_doc(payload, title, "[ok] Claude Code · 一轮完成", extra), as_reply=followed):
+    if send_reply_doc(_reply_doc(payload, title, "[ok] Claude Code · 一轮完成", extra), followed, session_id):
         log(f"[Feishu] turn end sent ({'followed' if followed else 'long turn'})")
 
 
 def wake_message(commands: list[dict[str, Any]]) -> str:
-    texts = [str(c.get("text") or "").strip() for c in commands]
-    if len(texts) == 1:
-        body = texts[0]
-    else:
-        body = "\n".join(f"第 {n} 条：\n{text}" for n, text in enumerate(texts, 1))
-    # Nothing follows the user's words, so quotes or newlines in them cannot blur where they end.
-    return (
-        "【飞书指令】用户在已绑定的飞书账号上给这个会话发来指令（见会话开头注入的“飞书远程回复规则”）。"
-        "不需要批准的事直接照做；需要用户拍板的事（提交、推送、删除、在几个方向里选一个等），"
-        "先用 AskUserQuestion 确认，用户可以直接在飞书上作答。这一轮结束时，你最后的回复会发回用户的飞书，"
-        f"请把结果写在最后的回复里。\n指令原文（到本消息结尾为止）：\n{body}"
-    )
+    return reply_bridge.command_text(commands)
 
 
 def _end_reason(session_id: str, me: dict[str, Any], parent: tuple[int, Optional[int]]) -> Optional[str]:
@@ -184,19 +175,10 @@ def wait_for_commands(session_id: str, me: dict[str, Any],
         time.sleep(POLL_SECONDS)
 
 
-def main() -> int:
-    started_at = time.time()
-    sys.stderr = open(os.devnull, "w", encoding="utf-8")  # see WAKE_STREAM
-    payload = read_payload()
-    session_id = str(payload.get("session_id") or "")
-    if not feishu_notify.ready() or not reply_bridge.valid_id(session_id):
-        return 0  # setup.ps1 not run yet: stay silent
-    title = session_title(str(payload.get("transcript_path") or ""))
-    if not relay_last_reply(payload, session_id, title):
-        try:
-            notify_done(payload, session_id, title)
-        except Exception as exc:  # a failed notice must not keep the waiter from starting
-            log(f"[Feishu] turn end notice failed: {exc}")
+def serve_commands(session_id: str, started_at: float) -> int:
+    """Register as the session's command waiter and wait; exit code 2 wakes Claude
+    with the commands (the hook runs with asyncRewake). Also used after a stop from
+    Feishu (claude_stop_wait.py), which ends a turn without a Stop hook."""
     parent_pid = os.getppid()  # claude.exe for hooks started by Claude Code
     parent = (parent_pid, reply_bridge.process_created(parent_pid))
     me = {"waiter_pid": os.getpid(), "waiter_created": reply_bridge.process_created(os.getpid()),
@@ -210,6 +192,23 @@ def main() -> int:
     WAKE_STREAM.flush()
     log(f"[Feishu] delivered {len(commands)} Feishu command(s) to the session")
     return 2
+
+
+def main() -> int:
+    started_at = time.time()
+    sys.stderr = open(os.devnull, "w", encoding="utf-8")  # see WAKE_STREAM
+    payload = read_payload()
+    session_id = str(payload.get("session_id") or "")
+    if not feishu_notify.ready() or not reply_bridge.valid_id(session_id):
+        return 0  # setup.ps1 not run yet: stay silent
+    reply_bridge.clear_stop(session_id)  # the turn ended before any tool call could stop it
+    title = session_title(str(payload.get("transcript_path") or ""))
+    if not relay_last_reply(payload, session_id, title):
+        try:
+            notify_done(payload, session_id, title)
+        except Exception as exc:  # a failed notice must not keep the waiter from starting
+            log(f"[Feishu] turn end notice failed: {exc}")
+    return serve_commands(session_id, started_at)
 
 
 if __name__ == "__main__":

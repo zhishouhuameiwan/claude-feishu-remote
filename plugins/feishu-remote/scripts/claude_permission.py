@@ -251,9 +251,18 @@ def build_info(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+STOP_MESSAGE = ("用户在飞书上叫停了这一轮，这次操作没有执行。请直接结束这一轮，不要再调用工具；"
+                "只停这一轮，之后用户在电脑上或飞书上发来的新指令照常处理。")
+
+
 def decision_output(outcome: dict[str, Any]) -> bytes:
     if outcome.get("choice") == "allow":
         decision: dict[str, Any] = {"behavior": "allow"}
+    elif outcome.get("choice") == "stop":
+        # No "interrupt": an interrupted turn fires no Stop hook (measured 2026-11-16), so
+        # the session would stop taking Feishu commands. The listener also leaves a stop
+        # request, so a further tool call is stopped by claude_turn_control.py.
+        decision = {"behavior": "deny", "message": STOP_MESSAGE}
     else:
         message = "用户在飞书上拒绝了这次操作。"
         if outcome.get("text"):
@@ -379,11 +388,12 @@ def run(payload: dict[str, Any], started_at: float) -> int:
         reply_bridge.close_request(rid, "disabled")
         return 0
     reply_bridge.create_request(rid, {**base, "message_id": message_id}, update_session=False)
+    reply_bridge.remember_message(message_id, base["session_id"])  # a reply to the card goes to this session
 
     outcome = wait_for_outcome(rid, watch, started_at, parent, subagent)
     if outcome.get("kind") == "answer":
-        output = (answer_output(_as_dict(payload.get("tool_input")), outcome) if asking
-                  else decision_output(outcome))
+        output = (answer_output(_as_dict(payload.get("tool_input")), outcome)
+                  if asking and outcome.get("choice") != "stop" else decision_output(outcome))
         sys.stdout.buffer.write(output)
         sys.stdout.flush()
         return 0

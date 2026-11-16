@@ -100,8 +100,8 @@ def on_message(data: Any) -> None:
     Before binding: setup shows a one-time code on the computer; the user sends it
     to the bot in a private chat. That one message gives both the chat to write to
     and the only account allowed to answer. Every other message is ignored.
-    After binding: the bound account's messages are commands (see COMMANDS); all
-    other senders are ignored."""
+    After binding: the bound account's messages are commands (see COMMANDS) or text
+    for a session (handle_text); all other senders are ignored."""
     try:
         event = data.event
         message, sender = event.message, event.sender
@@ -112,7 +112,8 @@ def on_message(data: Any) -> None:
         allowed = feishu_notify.read_config_field("allowed_open_id")
         if allowed:
             if open_id == allowed:
-                _in_background(handle_command, text)
+                replied_to = [str(getattr(message, name, "") or "") for name in ("parent_id", "root_id")]
+                _in_background(handle_text, text, replied_to)
             else:
                 log.warning("ignored message from open_id=%s", open_id)
             return
@@ -136,10 +137,13 @@ COMMANDS = {"会话": "sessions", "sessions": "sessions", "帮助": "help", "hel
 HELP_TITLE = "Claude 远程回复 · 可用命令"
 HELP_BODY = ("会话：列出本机的活跃会话（工作中、等你处理、空闲但能接收指令的），"
              "每个会话下面有输入框，可以直接给它发指令，Claude 做完会把最后的回复发回这里；"
-             "点“查看”看它正在做什么，详情卡上可以“关注”它（之后每轮结束都推送）\n"
+             "点“查看”看它正在做什么，详情卡上可以“关注”它（之后每轮结束都推送）；"
+             "“停止”叫停它正在跑的这一轮（在它下一次调用工具时生效）\n"
              "通知 [分钟数|关]：任何一轮运行超过这么久，结束时把最后的回复推到这里（默认 5 分钟）\n"
              "帮助：显示这条说明\n\n"
-             "回答 Claude 的审批和提问请直接在卡片上操作；直接发在聊天里的文字不会转给 Claude。")
+             "给会话发指令的另外两种方式：在聊天里“回复”某个会话发来的消息或卡片，文字就发给那个会话；"
+             "或在会话列表上点“设为当前会话”，之后 30 分钟内直接打的字都发给它。"
+             "会话正忙时，指令在它下一次调用工具时送达。回答审批和提问请直接在卡片上操作。")
 NOTIFY_MAX_MINUTES = 24 * 60
 
 
@@ -168,12 +172,59 @@ def _sessions_card() -> dict[str, Any]:
         return session_list.error_card(f"插件内部错误（{type(exc).__name__}），详情见 listener.log。")
 
 
-def handle_command(text: str) -> None:
+def parse_command(text: str) -> tuple[Optional[str], str]:
+    """(command, argument); command None when the first word is no command."""
     word, _, argument = text.replace("\u3000", " ").strip().lstrip("/").partition(" ")  # full-width space
     command = COMMANDS.get(word.lower())
     if command is None and word.startswith("通知"):  # "通知10": no space needed in Chinese
         command, argument = "notify", word[len("通知"):]
-    argument = argument.strip()
+    return command, argument.strip()
+
+
+def handle_text(text: str, replied_to: list[str]) -> None:
+    """Chat text of the bound user. A reply to a message about a session goes to that
+    session, whatever it says; otherwise a command word is a command; otherwise the
+    text goes to the current session, if one is chosen; otherwise the help."""
+    target = next((sid for sid in map(reply_bridge.session_of_message, replied_to) if sid), None)
+    if target:
+        send_text_command(target, text, via_current=False)
+        return
+    if parse_command(text)[0] is None:
+        current = reply_bridge.current_session()
+        if current:
+            reply_bridge.touch_current()
+            send_text_command(current, text, via_current=True)
+            return
+    handle_command(text)
+
+
+def send_text_command(session_id: str, text: str, via_current: bool) -> None:
+    """Queue chat text as a command for the session and say where it went. The receipt
+    is remembered too, so replying to it reaches the same session."""
+    full = text.strip()
+    text = full[:ANSWER_TEXT_LIMIT]
+    if not text:
+        return
+    reply_bridge.queue_command(session_id, text, feishu_notify.read_config_field("allowed_open_id"))
+    name, listed = session_list.session_label(session_id)
+    if reply_bridge.command_waiter_alive(session_id):
+        how = "它空闲着，马上开始处理；做完会把结果发到这里。"
+    elif listed:
+        how = "它正在忙：在它下一次调用工具时送达，最晚这一轮结束时送达。"
+    else:
+        how = "这个会话可能已经结束：指令已排队，12 小时内它再次运行时会收到。"
+    note = ("\n（这是你选的当前会话：30 分钟内直接打的字都发给它；在会话列表上可以换或取消。）"
+            if via_current else "")
+    if len(full) > ANSWER_TEXT_LIMIT:
+        note += f"\n（太长了：只发出了前 {ANSWER_TEXT_LIMIT} 字。）"
+    log.info("chat text queued for session %s (%s)", session_id, "current" if via_current else "reply")
+    receipt = feishu_notify.send_reply_text("Claude 远程回复 · 指令已发出",
+                                            f"已发给「{short(name or session_id[:8], 60)}」：{how}{note}")
+    reply_bridge.remember_message(receipt or "", session_id)
+
+
+def handle_command(text: str) -> None:
+    command, argument = parse_command(text)
     log.info("command %s", command or "unknown")
     if command == "sessions" and not argument:
         feishu_notify.send_reply_card(_sessions_card())
@@ -340,7 +391,7 @@ def show_detail(session_id: str, page: int, message_id: str, new_card: bool) -> 
     if message_id and not new_card:
         feishu_notify.update_feishu_card(message_id, card)
     else:
-        feishu_notify.send_reply_card(card)
+        reply_bridge.remember_message(feishu_notify.send_reply_card(card), session_id)
 
 
 def handle_detail(open_id: str, value: dict[str, Any], message_id: str) -> Any:
@@ -374,7 +425,7 @@ def send_latest_text(session_id: str) -> None:
         feishu_notify.send_reply_text("Claude 远程回复", "找不到这个会话的记录文件。")
         return
     doc_id = reply_bridge.save_doc(doc)
-    feishu_notify.send_reply_card(decision_card.paged_card(doc_id, doc, 0))
+    reply_bridge.remember_message(feishu_notify.send_reply_card(decision_card.paged_card(doc_id, doc, 0)), session_id)
 
 
 def handle_fulltext(open_id: str, value: dict[str, Any]) -> Any:
@@ -401,7 +452,61 @@ def handle_page(open_id: str, value: dict[str, Any]) -> Any:
     return _response("info", f"第 {page + 1} 页", decision_card.paged_card(doc_id, doc, page))
 
 
-VIEW_KINDS = ("detail", "follow", "fulltext", "page")
+STOP_REQUESTED = ("已请求停止：它在下一次调用工具时停下（正在写长段文字或等子代理时，要等到它调用工具，"
+                  "最晚这一轮结束）；正在等审批或回答的，替你答“停止”。停下后会通知你。")
+
+
+def answer_cards_with_stop(session_id: str, open_id: str) -> None:
+    """A session waiting on an approval or question card gets it answered "stop":
+    claude_permission.py denies it and tells Claude to end the turn."""
+    for request in reply_bridge.open_requests():
+        if request.get("session_id") != session_id or request.get("type") not in ("permission", "ask"):
+            continue
+        if reply_bridge.save_answer(str(request.get("rid")), "stop", "", open_id):
+            log.info("stop answered card %s", request.get("rid"))
+            message_id = str(request.get("message_id") or "")
+            if message_id:
+                feishu_notify.update_feishu_card(
+                    message_id, decision_card.result_card(request.get("info", {}), "已在飞书叫停这一轮", "grey"))
+
+
+def handle_stop(open_id: str, value: dict[str, Any]) -> Any:
+    """"停止": leave a stop request for claude_turn_control.py, which stops the next tool
+    call, and answer any card the session waits on (in the background: the file scan
+    must not delay this answer). An idle session (a stale card) has nothing to stop,
+    and a request left on it would stop a later turn."""
+    if not _allowed(open_id, "stop"):
+        return _response("error", "你没有权限停止会话")
+    session_id = str(value.get("sid") or "")
+    if not reply_bridge.valid_id(session_id):
+        return _response("error", "这个按钮不认识")
+    if reply_bridge.command_waiter_alive(session_id):
+        return _response("info", "它现在空闲着，没有正在跑的一轮，不用停止")
+    reply_bridge.request_stop(session_id)
+    log.info("stop requested for session %s", session_id)
+    _in_background(answer_cards_with_stop, session_id, open_id)
+    return _response("success", STOP_REQUESTED)
+
+
+def handle_current(open_id: str, value: dict[str, Any], message_id: str) -> Any:
+    """"设为当前会话": plain chat text goes to this session for 30 minutes."""
+    if not _allowed(open_id, "current"):
+        return _response("error", "你没有权限选择会话")
+    session_id = str(value.get("sid") or "")
+    if not reply_bridge.valid_id(session_id) or not isinstance(value.get("on"), bool):
+        return _response("error", "这个按钮不认识")
+    reply_bridge.set_current(session_id if value["on"] else None)
+    log.info("current session: %s", session_id if value["on"] else "none")
+    if value.get("card") == "detail":
+        _in_background(show_detail, session_id, 0, message_id, False)
+    elif value.get("card") == "list":
+        _in_background(refresh_sessions, message_id)
+    if value["on"]:
+        return _response("success", "已设为当前会话：30 分钟内直接在聊天里打字都发给它")
+    return _response("success", "已取消当前会话")
+
+
+VIEW_KINDS = ("detail", "follow", "fulltext", "page", "stop", "current")
 
 
 def _option_label(question: dict[str, Any], picked: Any) -> Optional[str]:
@@ -519,6 +624,10 @@ def on_card_action(data: Any) -> Any:
                 return handle_fulltext(open_id, value)
             if kind == "page":
                 return handle_page(open_id, value)
+            if kind == "stop":
+                return handle_stop(open_id, value)
+            if kind == "current":
+                return handle_current(open_id, value, message_id)
             return handle_sessions_click(open_id, message_id)
         return handle_answer(open_id, value, action.form_value or {})
     except Exception:

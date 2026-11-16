@@ -20,6 +20,12 @@ replies/session-<sid>.relay the running turn was started from Feishu: report its
 Viewing (session_detail.py, claude_command_wait.py):
 replies/doc-<id>.json       a long reply, shown a page at a time on a card
 replies/follow-<sid>.flag   the user follows this session: every turn's last reply goes to Feishu
+
+Control while a turn runs (claude_turn_control.py, claude_stop_wait.py):
+replies/stop-<sid>.flag     the user asked to stop the running turn; the next tool call claims it
+replies/stopped-<sid>.<tool_use_id>.flag  that tool call stopped the turn; its async hook waits for commands
+replies/msg-<message_id>.sid  the session a Feishu message is about, for replies to it
+replies/current.json        the session plain chat text goes to, and when it was last used
 """
 
 from __future__ import annotations
@@ -339,6 +345,148 @@ def take_relay(session_id: str) -> Optional[float]:
     except FileNotFoundError:
         return None
     return marked
+
+
+def command_text(commands: list[dict[str, Any]], during_turn: bool = False) -> str:
+    """The commands as Claude receives them: woken by the Stop hook, or added to a
+    running turn at its next tool call (during_turn). The marker is the one the
+    rule injected by claude_session_start.py explains."""
+    texts = [str(c.get("text") or "").strip() for c in commands]
+    if len(texts) == 1:
+        body = texts[0]
+    else:
+        body = "\n".join(f"第 {n} 条：\n{text}" for n, text in enumerate(texts, 1))
+    when = ("（这一轮进行中送达：先看它是否改变你正在做的事，再继续）" if during_turn else "")
+    # Nothing follows the user's words, so quotes or newlines in them cannot blur where they end.
+    return (
+        f"【飞书指令】用户在已绑定的飞书账号上给这个会话发来指令{when}（见会话开头注入的“飞书远程回复规则”）。"
+        "不需要批准的事直接照做；需要用户拍板的事（提交、推送、删除、在几个方向里选一个等），"
+        "先用 AskUserQuestion 确认，用户可以直接在飞书上作答。这一轮结束时，你最后的回复会发回用户的飞书，"
+        f"请把结果写在最后的回复里。\n指令原文（到本消息结尾为止）：\n{body}"
+    )
+
+
+# ---------------------------------------------------------------- stopping a running turn
+
+# A stop is meant for the turn running when the user tapped "停止". Stop and
+# UserPromptSubmit clear it; this limit is the backstop should both be missed
+# (a turn that writes text for long without calling a tool still gets stopped).
+STOP_MAX_AGE_SECONDS = 30 * 60
+# Both PreToolUse hooks use this when a payload carries no tool_use_id.
+NO_TOOL_USE_ID = "no-tool-use-id"
+
+
+def request_stop(session_id: str) -> None:
+    """The user asked to stop the session's running turn (claude_turn_control.py acts on it)."""
+    _write_text_atomic(_path(f"stop-{_safe(session_id)}.flag"), repr(time.time()))
+
+
+def stop_requested(session_id: str) -> bool:
+    return _is_safe(session_id) and _path(f"stop-{session_id}.flag").is_file()
+
+
+def claim_stop(session_id: str, tool_use_id: str) -> bool:
+    """Move the stop request to the tool call that stops the turn. A rename, so of the
+    tool calls running at once exactly one claims it. A request past its limit is dropped."""
+    if not (_is_safe(session_id) and _is_safe(tool_use_id)):
+        return False
+    request = _path(f"stop-{session_id}.flag")
+    if not 0 <= time.time() - _read_time(request.name) <= STOP_MAX_AGE_SECONDS:
+        request.unlink(missing_ok=True)
+        return False
+    try:
+        os.rename(request, _path(f"stopped-{session_id}.{tool_use_id}.flag"))
+        return True
+    except OSError:  # nothing requested, or another call claimed it
+        return False
+
+
+STOPPED_TURN_SECONDS = 120  # a backstop: the next prompt ends it in any case
+
+
+def mark_turn_stopped(session_id: str) -> None:
+    """The running turn was stopped: further tool calls of it (the rest of a parallel
+    batch) are denied until the next prompt (mark_prompt, also run for woken turns)."""
+    _write_text_atomic(_path(f"session-{_safe(session_id)}.stopped_at"), repr(time.time()))
+
+
+def turn_stopped(session_id: str) -> bool:
+    if not _is_safe(session_id):
+        return False
+    stopped = _read_time(f"session-{session_id}.stopped_at")
+    return stopped > prompt_time(session_id) and 0 <= time.time() - stopped <= STOPPED_TURN_SECONDS
+
+
+def clear_turn_stopped(session_id: str) -> None:
+    if _is_safe(session_id) and not turn_stopped(session_id):
+        _path(f"session-{session_id}.stopped_at").unlink(missing_ok=True)
+
+
+def stopped_anywhere(session_id: str) -> bool:
+    """Some tool call of the session stopped the turn and its waiter has not taken over yet."""
+    return _is_safe(session_id) and REPLY_DIR.exists() and any(REPLY_DIR.glob(f"stopped-{session_id}.*.flag"))
+
+
+def was_stopped(session_id: str, tool_use_id: str) -> bool:
+    return (_is_safe(session_id) and _is_safe(tool_use_id)
+            and _path(f"stopped-{session_id}.{tool_use_id}.flag").is_file())
+
+
+def take_stopped(session_id: str, tool_use_id: str) -> None:
+    _path(f"stopped-{_safe(session_id)}.{_safe(tool_use_id)}.flag").unlink(missing_ok=True)
+
+
+def clear_stop(session_id: str) -> None:
+    """A new turn began or the turn ended: a stop that no tool call reached is void."""
+    if _is_safe(session_id):
+        _path(f"stop-{session_id}.flag").unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------- chat text to a session
+
+def remember_message(message_id: str, session_id: str) -> None:
+    """A Feishu message about this session: replying to it sends the reply there."""
+    if _is_safe(message_id) and _is_safe(session_id):
+        _write_text_atomic(_path(f"msg-{message_id}.sid"), session_id)
+
+
+def session_of_message(message_id: str) -> Optional[str]:
+    if not _is_safe(message_id):
+        return None
+    try:
+        session_id = _path(f"msg-{message_id}.sid").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return session_id if _is_safe(session_id) else None
+
+
+CURRENT_SESSION_SECONDS = 30 * 60
+
+
+def set_current(session_id: Optional[str]) -> None:
+    """The session plain chat text goes to; None clears it."""
+    path = _path("current.json")
+    if session_id is None:
+        path.unlink(missing_ok=True)
+    else:
+        _write_json_atomic(path, {"sid": _safe(session_id), "at": time.time()})
+
+
+def current_session() -> Optional[str]:
+    """The current session, unless it went unused for CURRENT_SESSION_SECONDS."""
+    data = _read_json(_path("current.json")) or {}
+    session_id = data.get("sid")
+    try:
+        age = time.time() - float(data.get("at", 0))
+    except (TypeError, ValueError):
+        return None
+    return session_id if _is_safe(session_id) and 0 <= age <= CURRENT_SESSION_SECONDS else None
+
+
+def touch_current() -> None:
+    session_id = current_session()
+    if session_id:
+        set_current(session_id)
 
 
 # ---------------------------------------------------------------- long replies, followed sessions

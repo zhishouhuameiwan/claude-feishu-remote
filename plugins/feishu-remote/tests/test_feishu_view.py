@@ -181,13 +181,23 @@ check(any("这一轮已运行 10 分钟" in t for t in texts) and any("最近一
 check(any(t.startswith("正在执行：\n· Grep：def main") for t in texts), "  the running tool call")
 check(any(t.startswith("Claude 最新的话：\n先看看测试") for t in texts), "  Claude's newest words")
 labels = [b[0] for b in buttons(card)]
-check(labels == ["刷新", "看 Claude 最新的话全文", "关注（每轮结束都推送）"], f"  buttons: {labels}")
+check(labels == ["刷新", "停止这一轮", "看 Claude 最新的话全文", "关注（每轮结束都推送）", "设为当前会话（直接打字发给它）"],
+      f"  buttons of a working session: {labels}")
+check(dict(buttons(card))["停止这一轮"] == {"kind": "stop", "sid": "v-1"}
+      and dict(buttons(card))["设为当前会话（直接打字发给它）"] == {"kind": "current", "sid": "v-1", "on": True,
+                                                         "card": "detail"}, "  stop and current carry the session id")
 check(buttons(card)[0][1] == {"kind": "detail", "sid": "v-1", "page": 0}, "  refresh carries the session id")
 check(all(e["text"]["tag"] == "plain_text" for e in card["body"]["elements"] if e.get("tag") == "div"),
       "  every text is plain_text")
 agents([{"sessionId": "v-1", "name": "修测试", "cwd": r"E:\proj", "kind": "interactive", "status": "idle", "pid": 7}])
-texts = card_texts(DC.detail_card(S.detail_info("v-1", 0, time.time())))
+idle_card = DC.detail_card(S.detail_info("v-1", 0, time.time()))
+texts = card_texts(idle_card)
 check(not any("已运行" in t or "正在执行" in t for t in texts), "  idle: no running time, no running tool")
+check("停止这一轮" not in [b[0] for b in buttons(idle_card)], "  idle: nothing to stop")
+RB.set_current("v-1")
+check("取消当前会话" in [b[0] for b in buttons(DC.detail_card(S.detail_info("v-1", 0, time.time())))],
+      "  the current session offers to cancel it")
+RB.set_current(None)
 agents([])
 texts = card_texts(DC.detail_card(S.detail_info("v-1", 0, time.time())))
 check("claude agents 没有列出" in texts[0], "  not listed -> says it may have ended")
@@ -248,7 +258,7 @@ flag = RB._path("follow-v-1.flag")
 os.utime(flag, (time.time() - 6 * 86400,) * 2)
 check(RB.following("v-1", touch=True) and time.time() - flag.stat().st_mtime < 60,
       "  followed; touching keeps the flag fresh for cleanup")
-check(DC.detail_card(S.detail_info("v-1", 0, time.time()))["body"]["elements"][-1]["behaviors"][0]["value"]
+check(dict(buttons(DC.detail_card(S.detail_info("v-1", 0, time.time())))).get("取消关注")
       == {"kind": "follow", "sid": "v-1", "on": False}, "  the detail card offers to unfollow")
 RB.set_following("v-1", False)
 RB.set_following("v-1", False)
@@ -307,6 +317,27 @@ print("== the session list offers 查看 for every listed session")
 card = DC.sessions_card("x", [{"text": "a", "sid": "v-1", "send": None}, {"text": "b", "sid": None, "send": None}], "")
 check(buttons(card)[:1] == [("查看", {"kind": "detail", "sid": "v-1", "open": True})] and len(buttons(card)) == 2,
       "  a 查看 button per session with an id, then refresh")
+card = DC.sessions_card("x", [{"text": "a", "sid": "v-1", "stop": True, "current": False,
+                               "send": {"sid": "v-1", "pid": 7}}], "")
+labels = [b[0] for b in buttons(card)]
+check(labels == ["查看", "停止这一轮", "设为当前会话（直接打字发给它）", "刷新"],
+      f"  a working session: 查看, 停止, its send box, 设为当前会话: {labels}")
+agents([{"sessionId": "v-1", "name": "修测试", "cwd": r"E:\proj", "kind": "interactive", "status": "busy", "pid": 7},
+        {"sessionId": "v-many", "name": "很多步", "cwd": "E:\\", "kind": "interactive", "status": "idle", "pid": 8}])
+RB.register_command_waiter("v-many", {"waiter_pid": os.getpid(), "waiter_created": RB.process_created(os.getpid())})
+RB.set_current("v-many")
+listed = S.build_card(S.collect(), time.time())
+values = [b[1] for b in buttons(listed)]
+check({"kind": "stop", "sid": "v-1"} in values and {"kind": "stop", "sid": "v-many"} not in values,
+      "  the list offers 停止 for the working session only")
+check({"kind": "current", "sid": "v-many", "on": False, "card": "list"} in values,
+      "  ... and marks the current session")
+RB.set_current(None)
+worst_row = {"session_id": "s" * 36, "name": "名" * 60, "cwd": "路" * 120, "kind": "background", "status": "busy",
+             "waiting_for": "permission prompt", "pid": 1, "cards": [{"type": "permission"}] * 3, "listed": True,
+             "model": "m" * 60, "active": time.time(), "commandable": True, "queued": 9}
+size = request_bytes(S.build_card([dict(worst_row) for _ in range(S.MAX_ENTRIES + 3)], time.time()))
+check(size < 28000, f"  a full session list with every button stays under 30 KB: {size} bytes")
 
 shutil.rmtree(WORK, ignore_errors=True)
 print()

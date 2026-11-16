@@ -306,7 +306,7 @@ for app_id, keeps in (("cli_test", True), ("cli_other", False)):
 os.environ.pop("FEISHU_SETUP_APP_ID"); os.environ.pop("FEISHU_SETUP_APP_SECRET")
 
 for script, phrase in (("claude_decision.py", "飞书远程回复规则"), ("claude_wrapup_redirect.py", "飞书远程回复规则"),
-                       ("claude_permission.py", "飞书远程回复规则"), ("claude_command_wait.py", "飞书远程回复规则")):
+                       ("claude_permission.py", "飞书远程回复规则"), ("reply_bridge.py", "飞书远程回复规则")):
     text = open(os.path.join(HOOK_DIR, script), encoding="utf-8").read()
     check(phrase in text and "CLAUDE.md" not in text, f"  {script} points at the injected rule, not a CLAUDE.md")
 
@@ -349,6 +349,23 @@ check(stop_hook.get("asyncRewake") is True, "  the command waiter runs in the ba
 marker = "【飞书指令】"
 check(claude_command_wait.wake_message([{"text": "x"}]).startswith(marker) and marker in claude_session_start.RULE,
       "  the injected rule names the marker the command waiter uses")
+pre_all = [hook for group in HOOKS["PreToolUse"] if group.get("matcher", "") == "" for hook in group["hooks"]]
+control = [h for h in pre_all if h["args"][-1].endswith("claude_turn_control.py")]
+stop_wait = [h for h in pre_all if h["args"][-1].endswith("claude_stop_wait.py")]
+check(len(control) == 1 and not control[0].get("asyncRewake") and not control[0].get("async")
+      and control[0]["timeout"] <= 10, "  every tool call: the sync turn control hook, short timeout")
+check(len(stop_wait) == 1 and stop_wait[0].get("asyncRewake") is True
+      and stop_wait[0]["timeout"] - claude_command_wait.MAX_WAIT_SECONDS >= 60,
+      "  ... and its async partner, which may wait 12 hours for a command after a stop")
+import claude_permission as permission_module  # noqa: E402
+import claude_turn_control  # noqa: E402
+import reply_bridge as bridge_module  # noqa: E402
+stop_phrase = "用户在飞书上叫停了这一轮"
+check(stop_phrase in claude_turn_control.STOP_REASON and stop_phrase in permission_module.STOP_MESSAGE
+      and stop_phrase in claude_session_start.RULE, "  the rule explains the stop wording both hooks use")
+during = bridge_module.command_text([{"text": "x"}], during_turn=True)
+check(during.startswith(marker) and "这一轮进行中送达" in during and "这一轮进行中送达" in claude_session_start.RULE,
+      "  ... and commands added to a running turn")
 
 shutil.rmtree(WORK, ignore_errors=True)
 print()
