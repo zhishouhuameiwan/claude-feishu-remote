@@ -232,6 +232,49 @@ def approval_card(rid: str, info: dict[str, Any]) -> dict[str, Any]:
     return _card(APPROVAL_HEADER, info.get("title", ""), "red", elements)
 
 
+SESSIONS_HEADER = "Claude Code · 活跃会话"
+
+
+def sessions_card(summary: str, entries: list[dict[str, Any]], footer: str) -> dict[str, Any]:
+    """Answer to the "会话" command. entries: {"text": one session, already formatted
+    and size-bounded by session_list.py, "send": None or {"sid", "pid"}: a box for
+    sending that session a command}. A button at the end refreshes this card."""
+    elements = [_text(summary)]
+    for index, entry in enumerate(entries):
+        elements += [{"tag": "hr"}, _text(entry["text"])]
+        if entry.get("send"):
+            elements.append(_send_form(index, entry["send"]))
+    if footer:
+        elements += [{"tag": "hr"}, _text(footer)]
+    elements.append(_button("刷新", {"kind": "sessions"}, True))
+    return _card(SESSIONS_HEADER, "", "blue", elements)
+
+
+def _send_form(index: int, target: dict[str, Any]) -> dict[str, Any]:
+    """Names are unique in the card; the button tells the listener which box is its own."""
+    field = f"cmd_text_{index}"
+    return {
+        "tag": "form",
+        "name": f"send_form_{index}",
+        "elements": [
+            {
+                "tag": "input",
+                "name": field,
+                "max_length": 1000,
+                "placeholder": {"tag": "plain_text", "content": "给这个会话发指令（Claude 会照做，结果发回飞书）"},
+            },
+            {
+                "tag": "button",
+                "name": f"send_submit_{index}",
+                "type": "default",
+                "form_action_type": "submit",
+                "text": {"tag": "plain_text", "content": "发送"},
+                "behaviors": [{"type": "callback", "value": {"kind": "send", "field": field, **target}}],
+            },
+        ],
+    }
+
+
 def result_card(info: dict[str, Any], status: str, template: str) -> dict[str, Any]:
     """The request card with buttons removed and a status line added."""
     elements = [_text(line) for line in _info_lines(info)]

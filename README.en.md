@@ -14,9 +14,11 @@
 | Question dialog (AskUserQuestion) | Question card: buttons for a single-choice question, a form for several questions or multiple choice | Pick an option, or type your own answer |
 | A blocking question in the desktop app's "next step" box | Turned into a question card (see "How it works") | Same as above |
 | A plan waiting for approval, an MCP server asking for input, a session error | Text notification | Handle it at the computer |
+| You send 会话 ("sessions") to the bot in Feishu | The active sessions: status, project, model, last activity, cards still waiting for you, and a text box under each | Send a session an instruction; Claude sends its last reply back to Feishu. Tap 刷新 (refresh) to update the list |
 
 - If you answer on the computer first, the Feishu card switches to "handled on the computer", so nothing is answered twice.
-- Only the one Feishu account you bind can answer. Clicks from anyone else are refused.
+- A card waits up to 12 hours for you. After that it is closed and you handle the prompt at the computer.
+- Only the one Feishu account you bind can answer. Clicks and commands from anyone else are refused.
 - Approval cards show the full parameters. When they are too long to show in full, the card offers no Allow button, so you never approve something you could not read.
 - Until it is set up, the plugin does nothing: installed without running the setup script, Claude Code behaves exactly as without it.
 - The card buttons and messages are in Chinese.
@@ -45,7 +47,7 @@ flowchart LR
 
 - **Windows 10/11 and Feishu (China edition) only**; Lark international is not supported yet.
 - **Each computer needs its own Feishu app.** Feishu's persistent connection does not broadcast: when two computers connect with the same app, each tap goes to one of them at random. Two computers of the same person also need two apps.
-- **Security**: whoever controls the Feishu account you bind can approve actions on this computer from Feishu. Bind only your own account and make the app available only to yourself. Credentials are stored only on this computer, in `%LOCALAPPDATA%\FeishuRemote\config.json`.
+- **Security**: whoever controls the Feishu account you bind can approve actions on this computer from Feishu, and send instructions to running sessions. In a session that skips permission prompts or runs in auto mode, what a Feishu instruction leads to runs without an approval card too. Bind only your own account and make the app available only to yourself. Credentials are stored only on this computer, in `%LOCALAPPDATA%\FeishuRemote\config.json`.
 - Anything you could not have Claude do by saying it on the computer (for example typing a password for you), you cannot have it do through Feishu either.
 
 ## Installation
@@ -64,7 +66,7 @@ Open <https://open.feishu.cn/app>:
 3. Under **Permissions** (权限管理), enable these three scopes:
    - `im:message:send_as_bot`: send messages as the app
    - `im:message:update`: update messages (cards are marked as handled after you answer)
-   - `im:message.p2p_msg:readonly`: read the private messages users send to the bot (used once, for binding your account)
+   - `im:message.p2p_msg:readonly`: read the private messages users send to the bot (for binding your account and for commands such as 会话)
 4. **Create a version and publish it** (版本管理与发布 → 创建版本). Set the availability (可用范围) to yourself only. If your organisation requires admin review, wait for the approval. Keep the availability to yourself: anyone who can chat with the bot could send wrong codes while you bind and void your code.
 5. Note the **App ID** and **App Secret** under Credentials & Basic Info (凭证与基础信息); you need them in step 4.
 
@@ -114,7 +116,15 @@ Open a new Claude Code session. Sessions that were already open, including those
 
 ## Everyday use
 
-- **Pause notifications**: `python <plugin folder>\scripts\notify_switch.py off`; use `on` to resume.
+- **See the active sessions and send them instructions**: send 会话 to the bot in Feishu to get a card with the active sessions.
+  - Active means working, waiting for you (a permission prompt, a question or an open card), or idle but still able to take an instruction (its last turn ended less than 12 hours ago). Other idle sessions are only counted at the bottom.
+  - Sessions waiting for you come first. Each shows its project, current model, last activity, Feishu cards still waiting for your answer, and queued instructions.
+  - Each session has a text box: type an instruction and tap 发送 (send). An idle session starts on it right away; for a working session it is queued and delivered when the current turn ends. When that turn is done, Claude's last reply is sent back to Feishu.
+  - The instruction reaches the session as a notification, which Claude Code does not count as your own input (like replies to the "next step" box; this protection cannot be bypassed). So Claude does what needs no approval right away, and for anything that needs your decision (commit, push, delete) it first sends a question card that you answer in Feishu.
+  - Only text instructions work: slash commands such as `/compact` or `/model` do not. Only sessions opened after installing 1.1.0 can take instructions.
+  - A session takes the next instruction only after a turn ends normally: after a turn interrupted with Esc or ended by an API error, it takes instructions again once its next turn ends (instructions sent meanwhile are queued). An instruction still queued after 12 hours is dropped.
+  - The list comes from Claude Code's own `claude agents --json`, so the listener must be able to run `claude`. Send 帮助 ("help") for all commands.
+- **Pause notifications**: `python <plugin folder>\scripts\notify_switch.py off`; use `on` to resume. Commands you send still get an answer while notifications are paused.
 - **Receive on another Feishu account**: run `setup.ps1 -Rebind`.
 - **Switch to another Feishu app**: run `setup.ps1 -Reconfigure`. The old binding is cleared automatically; bind again.
 - Install only one copy per computer. Do not also load a copy with `--plugin-dir`: two copies make the listener restart back and forth.
@@ -147,6 +157,7 @@ claude plugin marketplace remove claude-feishu-remote
 | Tapping a card says the callback service is offline (回调服务当前未在线) | The listener is not running. Run "Feishu Remote Listener" in Task Scheduler, or run `setup.ps1` again. Log: `%LOCALAPPDATA%\FeishuRemote\listener.log`. |
 | No cards at all | Look at `%LOCALAPPDATA%\FeishuRemote\hooks.log`. `WinError 10061` usually means a system proxy is configured but the proxy program is not running. |
 | The binding code gets no reaction | Check that the app has `im:message.p2p_msg:readonly`, that the event subscription includes `im.message.receive_v1`, and that you published a new version after the changes. The code is valid for 30 minutes and is voided after 5 wrong attempts; run `setup.ps1` again for a new one. |
+| 会话 answers that the `claude` command cannot be found | The listener cannot find `claude`. Check that `claude --version` works in a new PowerShell window, then run `setup.ps1` again (it restarts the listener); if that does not help, sign out of Windows and back in. |
 | Setup says the listener did not start within 2 minutes | On a first start, antivirus scanning of the new files can be slow. Wait a moment and run `setup.ps1` again. |
 | Two computers use the same app | They steal each other's taps. Give every computer its own app. |
 | `claude plugin marketplace add zhishouhuameiwan/claude-feishu-remote` hangs, or a retry fails with `EBUSY` | The `owner/repo` shorthand clones the repository over SSH, which can stall on some networks. Press Ctrl+C, end the stuck `git.exe` and `ssh.exe` in Task Manager, delete the temporary folder named in the error (the one ending in `..clone` under `%USERPROFILE%\.claude\plugins\marketplaces\`), then add the marketplace by its full HTTPS URL: `claude plugin marketplace add https://github.com/zhishouhuameiwan/claude-feishu-remote.git`. |

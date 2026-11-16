@@ -2,7 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 Feishu long-connection listener: receives card button clicks and hands the
-answer to the waiting Claude hook through reply_bridge files.
+answer to the waiting Claude hook through reply_bridge files. It also answers
+the commands the bound user sends to the bot ("会话": session_list.py).
 
 Started by the scheduled task through launch_listener.py with the venv in the
 data folder (lark-oapi lives there), see paths.py:
@@ -32,6 +33,7 @@ import decision_card
 import feishu_notify
 import paths
 import reply_bridge
+import session_list
 from decision_card import short
 
 WORKER_LOG = str(paths.WORKER_LOG)
@@ -42,9 +44,6 @@ WORKER_LOCK = str(paths.WORKER_LOCK)
 # The supervisor then exits too, and the scheduled task restarts both through
 # launch_listener.py with the new code within 5 minutes.
 CODE_MOVED = 5
-# Only for requests without a recorded waiter pid: a waiting hook refreshes its
-# pending file every 2 s, so older than this means it is gone.
-WAITER_STALE_SECONDS = 20
 CLEANUP_EVERY_SECONDS = 3600
 WATCH_SECONDS = 5
 # The SDK retries a lost connection about every 2 minutes, but gives up for good on
@@ -96,24 +95,91 @@ def _response(toast_type: str, toast: str, card: Optional[dict[str, Any]] = None
 # ---------------------------------------------------------------- handlers
 
 def on_message(data: Any) -> None:
-    """Binding: setup shows a one-time code on the computer; the user sends it to the
-    bot in a private chat. That one message gives both the chat to write to and the
-    only account allowed to answer. Every other message is ignored."""
+    """Private text messages to the bot.
+
+    Before binding: setup shows a one-time code on the computer; the user sends it
+    to the bot in a private chat. That one message gives both the chat to write to
+    and the only account allowed to answer. Every other message is ignored.
+    After binding: the bound account's messages are commands (see COMMANDS); all
+    other senders are ignored."""
     try:
         event = data.event
         message, sender = event.message, event.sender
         if message.chat_type != "p2p" or message.message_type != "text" or sender.sender_type != "user":
             return
         text = str(json.loads(message.content or "{}").get("text") or "")
-        if feishu_notify.read_config_field("allowed_open_id") or not reply_bridge.take_bind_code(text):
-            return
         open_id = str(sender.sender_id.open_id or "")
+        allowed = feishu_notify.read_config_field("allowed_open_id")
+        if allowed:
+            if open_id == allowed:
+                _in_background(handle_command, text)
+            else:
+                log.warning("ignored message from open_id=%s", open_id)
+            return
+        if not reply_bridge.take_bind_code(text):
+            return
         feishu_notify.write_config_fields({"chat_id": str(message.chat_id), "allowed_open_id": open_id})
         log.info("bound open_id=%s chat_id=%s", open_id, message.chat_id)
         feishu_notify.send_feishu_message("Claude 远程回复 · 绑定成功",
-                                          "以后 Claude Code 等你审批或回答时，会在这里给你发卡片。")
+                                          "以后 Claude Code 等你审批或回答时，会在这里给你发卡片。"
+                                          "发送“会话”可以查看活跃会话并给它们发指令，发送“帮助”查看全部命令。")
     except Exception:
         log.exception("message event failed")
+
+
+# ---------------------------------------------------------------- commands
+
+# What the bound user can send to the bot (case and a leading "/" are ignored).
+COMMANDS = {"会话": "sessions", "sessions": "sessions", "帮助": "help", "help": "help"}
+HELP_TITLE = "Claude 远程回复 · 可用命令"
+HELP_BODY = ("会话：列出本机的活跃会话（工作中、等你处理、空闲但能接收指令的），"
+             "每个会话下面有输入框，可以直接给它发指令，Claude 做完会把最后的回复发回这里\n"
+             "帮助：显示这条说明\n\n"
+             "回答 Claude 的审批和提问请直接在卡片上操作；直接发在聊天里的文字不会转给 Claude。")
+
+
+def _in_background(fn: Any, *args: Any) -> None:
+    """Run a slow reply off the SDK's event thread, so the event is acknowledged at once.
+    When the reply fails (network, Feishu refusing it), the user is told so instead
+    of waiting for an answer that never comes."""
+    def run() -> None:
+        try:
+            fn(*args)
+        except Exception:
+            log.exception("background reply failed")
+            try:
+                feishu_notify.send_reply_text("Claude 远程回复 · 出错了",
+                                              "处理你的命令时出错了，详情见电脑上的 listener.log。")
+            except Exception:
+                log.exception("could not report the failure either")
+    threading.Thread(target=run, daemon=True).start()
+
+
+def _sessions_card() -> dict[str, Any]:
+    try:
+        return session_list.sessions_card()
+    except Exception as exc:  # a bug here must still answer the user
+        log.exception("session list failed")
+        return session_list.error_card(f"插件内部错误（{type(exc).__name__}），详情见 listener.log。")
+
+
+def handle_command(text: str) -> None:
+    command = COMMANDS.get(text.strip().lstrip("/").lower())
+    log.info("command %s", command or "unknown")
+    if command == "sessions":
+        feishu_notify.send_reply_card(_sessions_card())
+        return
+    intro = "" if command == "help" else f"没有“{short(text, 30)}”这个命令。\n\n"
+    feishu_notify.send_reply_text(HELP_TITLE, intro + HELP_BODY)
+
+
+def refresh_sessions(message_id: str) -> None:
+    """The refresh button: replace the clicked card with a fresh list."""
+    card = _sessions_card()
+    if message_id:
+        feishu_notify.update_feishu_card(message_id, card)
+    else:
+        feishu_notify.send_reply_card(card)
 
 
 def _closed_card(request: dict[str, Any], outcome: dict[str, Any]) -> dict[str, Any]:
@@ -127,13 +193,7 @@ def _closed_card(request: dict[str, Any], outcome: dict[str, Any]) -> dict[str, 
 
 
 def _waiter_gone(rid: str, request: dict[str, Any]) -> bool:
-    """Process identity decides; a late heartbeat alone (sleep/resume, a busy
-    machine) must not end a waiter that is still running."""
-    pid = request.get("waiter_pid")
-    if pid is not None:
-        return not reply_bridge.process_alive(pid, request.get("waiter_created"))
-    # Requests written before waiters recorded their pid: heartbeat only.
-    return time.time() - reply_bridge.request_mtime(rid) > WAITER_STALE_SECONDS
+    return not reply_bridge.waiter_alive(rid, request)
 
 
 def _picked_option(request: dict[str, Any], value: dict[str, Any]) -> Optional[str]:
@@ -188,7 +248,44 @@ def handle_answer(open_id: str, value: dict[str, Any], form_value: dict[str, Any
     return _response("success", "已发送给 Claude", decision_card.result_card(info, status, template))
 
 
+def handle_sessions_click(open_id: str, message_id: str) -> Any:
+    """The session list's refresh button. Built in the background: Feishu waits only
+    3 s for this response, and `claude agents` can be slow right after a reboot."""
+    allowed = feishu_notify.read_config_field("allowed_open_id")
+    if not allowed or open_id != allowed:
+        log.warning("rejected refresh from open_id=%s", open_id)
+        return _response("error", "你没有权限查看会话")
+    _in_background(refresh_sessions, message_id)
+    return _response("info", "正在刷新…")
+
+
 ANSWER_TEXT_LIMIT = 1000  # the card's text boxes allow 1000 characters
+
+
+def handle_send(open_id: str, value: dict[str, Any], form_value: dict[str, Any], message_id: str) -> Any:
+    """A send box on the session list: queue the command for that session's command
+    waiter (claude_command_wait.py), which wakes Claude with it."""
+    allowed = feishu_notify.read_config_field("allowed_open_id")
+    if not allowed or open_id != allowed:
+        log.warning("rejected command from open_id=%s", open_id)
+        return _response("error", "你没有权限给会话发指令")
+    session_id = str(value.get("sid") or "")
+    if not reply_bridge.valid_id(session_id):
+        return _response("error", "这个按钮不认识")
+    text = str(form_value.get(str(value.get("field") or "")) or "").strip()[:ANSWER_TEXT_LIMIT]
+    if not text:
+        return _response("error", "指令是空的")
+    waiting = reply_bridge.command_waiter_alive(session_id)
+    pid = value.get("pid")
+    if not waiting and isinstance(pid, int) and not reply_bridge.process_alive(pid):
+        _in_background(refresh_sessions, message_id)
+        return _response("error", "这个会话已经结束了，指令没有发出")
+    reply_bridge.queue_command(session_id, text, open_id)
+    log.info("queued a command for session %s (waiter %s)", session_id, "running" if waiting else "not running")
+    _in_background(refresh_sessions, message_id)
+    if waiting:
+        return _response("success", "已送达，Claude 马上开始处理；做完会把结果发到这里")
+    return _response("success", "已排队：这个会话现在没在等指令，它这一轮结束后就会收到")
 
 
 def _option_label(question: dict[str, Any], picked: Any) -> Optional[str]:
@@ -293,6 +390,11 @@ def on_card_action(data: Any) -> Any:
             # A dropdown inside a form changed; only the submit button counts.
             from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
             return P2CardActionTriggerResponse({})
+        if value.get("kind") in ("sessions", "send"):
+            message_id = str(getattr(getattr(event, "context", None), "open_message_id", "") or "")
+            if value["kind"] == "send":
+                return handle_send(open_id, value, action.form_value or {}, message_id)
+            return handle_sessions_click(open_id, message_id)
         return handle_answer(open_id, value, action.form_value or {})
     except Exception:
         log.exception("card action failed")
@@ -312,7 +414,8 @@ def _connected(client: Any) -> bool:
 
 
 # Everything the listener imports: a folder missing any of them (half unzipped) is not moved to.
-LISTENER_FILES = ("feishu_listener.py", "paths.py", "reply_bridge.py", "feishu_notify.py", "decision_card.py")
+LISTENER_FILES = ("feishu_listener.py", "paths.py", "reply_bridge.py", "feishu_notify.py", "decision_card.py",
+                  "session_list.py")
 
 
 def _same_folder(a: str, b: str) -> bool:

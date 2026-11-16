@@ -10,6 +10,12 @@ replies/<rid>.done.json     the single outcome, published with a hard link so th
 replies/session-<sid>.txt   newest request id of a Claude session
 replies/session-<sid>.prompt_at  time the user last typed in that session on the computer
 replies/bind.json           token of the pending "bind my Feishu account" card
+
+Commands the bound user sends to a session from Feishu (claude_command_wait.py):
+replies/cmd-<sid>.<ns>-<hex>.json  one queued command; "." cannot occur in a session id,
+                                   so "cmd-<sid>.*" never matches another session's files
+replies/cmdwait-<sid>.json  the session's command waiter (newest one wins)
+replies/session-<sid>.relay the running turn was started from Feishu: report its last reply
 """
 
 from __future__ import annotations
@@ -153,6 +159,35 @@ def close_request(rid: str, reason: str) -> bool:
     return _finish(rid, {"kind": "closed", "reason": reason})
 
 
+# Only for requests without a recorded waiter pid: a waiting hook refreshes its
+# pending file every 2 s, so older than this means it is gone.
+WAITER_STALE_SECONDS = 20
+
+
+def waiter_alive(rid: str, request: dict[str, Any]) -> bool:
+    """Is the hook that waits for this request still running? Process identity
+    decides; a late heartbeat alone (sleep/resume, a busy machine) must not end a
+    waiter that is still running."""
+    pid = request.get("waiter_pid")
+    if pid is not None:
+        return process_alive(pid, request.get("waiter_created"))
+    # Requests written before waiters recorded their pid: heartbeat only.
+    return time.time() - request_mtime(rid) <= WAITER_STALE_SECONDS
+
+
+def open_requests() -> list[dict[str, Any]]:
+    """Requests still waiting for an answer: no outcome yet and their hook alive."""
+    if not REPLY_DIR.exists():
+        return []
+    found = []
+    for path in REPLY_DIR.glob("*.pending.json"):
+        rid = path.name[: -len(".pending.json")]
+        request = get_request(rid)
+        if request is not None and get_outcome(rid) is None and waiter_alive(rid, request):
+            found.append(request)
+    return found
+
+
 # ---------------------------------------------------------------- sessions
 
 def session_request(session_id: str) -> Optional[str]:
@@ -225,6 +260,81 @@ def redirected_recently(session_id: str, ask: str, within: float) -> bool:
     except (TypeError, ValueError):
         return False
     return last.get("ask") == ask and 0 <= age <= within
+
+
+# ---------------------------------------------------------------- commands to a session
+
+def queue_command(session_id: str, text: str, open_id: str) -> None:
+    """Queue a command for the session; its command waiter delivers it (oldest first)."""
+    name = f"cmd-{_safe(session_id)}.{time.time_ns():020d}-{secrets.token_hex(4)}.json"
+    _write_json_atomic(_path(name), {"text": text, "at": time.time(), "open_id": open_id})
+
+
+def queued_commands(session_id: str) -> int:
+    if not _is_safe(session_id) or not REPLY_DIR.exists():
+        return 0
+    return len(list(REPLY_DIR.glob(f"cmd-{session_id}.*.json")))
+
+
+# A command nobody picked up in this time (the session ended, or never finished its
+# turn) is dropped rather than run days later in a resumed session.
+COMMAND_MAX_AGE_SECONDS = 12 * 3600
+
+
+def take_commands(session_id: str) -> list[dict[str, Any]]:
+    """Claim and remove the session's queued commands, oldest first. A rename claims
+    each file, so two waiters of one session can never deliver the same command."""
+    if not REPLY_DIR.exists():
+        return []
+    taken = []
+    oldest = time.time() - COMMAND_MAX_AGE_SECONDS
+    for path in sorted(REPLY_DIR.glob(f"cmd-{_safe(session_id)}.*.json")):
+        claimed = path.with_name(f"{path.name}.{os.getpid()}.taken")
+        try:
+            os.rename(path, claimed)
+        except OSError:
+            continue  # another waiter took it, or a writer still holds it: next round
+        command = _read_json(claimed)
+        claimed.unlink(missing_ok=True)
+        if command is None or not str(command.get("text") or "").strip():
+            continue
+        try:
+            fresh = float(command.get("at", 0)) >= oldest
+        except (TypeError, ValueError):
+            fresh = False
+        if fresh:
+            taken.append(command)
+    return taken
+
+
+def register_command_waiter(session_id: str, data: dict[str, Any]) -> None:
+    _write_json_atomic(_path(f"cmdwait-{_safe(session_id)}.json"), data)
+
+
+def command_waiter(session_id: str) -> Optional[dict[str, Any]]:
+    """The session's registered command waiter (alive or not), None if there is none."""
+    return _read_json(_path(f"cmdwait-{session_id}.json")) if _is_safe(session_id) else None
+
+
+def command_waiter_alive(session_id: str) -> bool:
+    waiter = command_waiter(session_id)
+    return waiter is not None and process_alive(waiter.get("waiter_pid"), waiter.get("waiter_created"))
+
+
+def mark_relay(session_id: str) -> None:
+    _write_text_atomic(_path(f"session-{_safe(session_id)}.relay"), repr(time.time()))
+
+
+def take_relay(session_id: str) -> Optional[float]:
+    """Once after mark_relay, the time it was marked: a turn was started from Feishu.
+    None when nothing is marked."""
+    path = _path(f"session-{_safe(session_id)}.relay")
+    marked = _read_time(path.name)
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return None
+    return marked
 
 
 def _read_time(name: str) -> float:

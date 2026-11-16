@@ -20,7 +20,7 @@
             "type": "command",
             "command": "python",
             "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/claude_permission.py"],
-            "timeout": 7500
+            "timeout": 43500
           }
         ]
       }
@@ -69,7 +69,7 @@
             "command": "python",
             "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/claude_decision.py"],
             "asyncRewake": true,
-            "timeout": 29100
+            "timeout": 43500
           },
           {
             "type": "command",
@@ -88,6 +88,19 @@
             "command": "python",
             "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/claude_cancel_pending.py"],
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python",
+            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/claude_command_wait.py"],
+            "asyncRewake": true,
+            "timeout": 43500
           }
         ]
       }

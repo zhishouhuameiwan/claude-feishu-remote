@@ -92,7 +92,7 @@ check(all(h["command"] == "python" and h["args"][0].startswith("${CLAUDE_PLUGIN_
           and os.path.isfile(os.path.join(HOOK_DIR, h["args"][0].rsplit("/", 1)[1])) for _, h in all_hooks),
       "hooks.json: every hook runs an existing script under ${CLAUDE_PLUGIN_ROOT}/scripts with python")
 check({ev for ev, _ in all_hooks} == {"SessionStart", "PermissionRequest", "Notification", "PreToolUse",
-                                     "UserPromptSubmit", "StopFailure"}, "hooks.json: the expected events")
+                                     "UserPromptSubmit", "Stop", "StopFailure"}, "hooks.json: the expected events")
 pre = {g["matcher"]: g["hooks"][0] for g in settings["hooks"]["PreToolUse"]}
 check(pre[WRAP]["args"][0].endswith("claude_decision.py") and pre[WRAP].get("asyncRewake") is True,
       "settings: wrap_up -> claude_decision.py with asyncRewake")
@@ -103,7 +103,10 @@ check(str((redirect_hook.get("args") or [""])[0]).endswith("claude_wrapup_redire
       "settings: wrap_up -> claude_wrapup_redirect.py, synchronous, timeout below the decision hook's 12 s wait")
 check(settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["args"][0].endswith("claude_cancel_pending.py"),
       "settings: UserPromptSubmit -> claude_cancel_pending.py")
-check("Stop" not in settings["hooks"], "settings: still no Stop hook")
+# No "task complete" reminder at every turn end: the only Stop hook is the command waiter,
+# which relays a reply only for turns started from Feishu (test_feishu_sessions.py).
+check([h["args"][0].rsplit("/", 1)[1] for ev, h in all_hooks if ev == "Stop"] == ["claude_command_wait.py"],
+      "settings: the only Stop hook is the Feishu command waiter")
 for name in (".claude-plugin/plugin.json", "../../.claude-plugin/marketplace.json"):
     json.loads(open(os.path.join(PLUGIN_DIR, name), encoding="utf-8").read())
 check(True, "plugin.json and marketplace.json parse")
@@ -303,9 +306,49 @@ for app_id, keeps in (("cli_test", True), ("cli_other", False)):
 os.environ.pop("FEISHU_SETUP_APP_ID"); os.environ.pop("FEISHU_SETUP_APP_SECRET")
 
 for script, phrase in (("claude_decision.py", "飞书远程回复规则"), ("claude_wrapup_redirect.py", "飞书远程回复规则"),
-                       ("claude_permission.py", "飞书远程回复规则")):
+                       ("claude_permission.py", "飞书远程回复规则"), ("claude_command_wait.py", "飞书远程回复规则")):
     text = open(os.path.join(HOOK_DIR, script), encoding="utf-8").read()
     check(phrase in text and "CLAUDE.md" not in text, f"  {script} points at the injected rule, not a CLAUDE.md")
+
+print("== answers to the user's own commands ignore the reminder switch")
+sent_raw = []
+saved_send = feishu_notify._send_to_chat
+feishu_notify._send_to_chat = lambda msg_type, content: sent_raw.append(msg_type) or "om_x"
+open(feishu_notify.SWITCH_FILE, "w").close()
+try:
+    check(feishu_notify.send_feishu_card({"x": 1}) is None, "  reminders off: a reminder card is not sent")
+    feishu_notify.send_reply_card({"x": 1})
+    feishu_notify.send_reply_text("t", "b")
+    check(sent_raw == ["interactive", "text"], f"  ... but command replies are: {sent_raw}")
+finally:
+    os.remove(feishu_notify.SWITCH_FILE)
+    feishu_notify._send_to_chat = saved_send
+
+print("== card waits: 12 hours, below the hook timeouts in hooks.json")
+with open(os.path.join(PLUGIN_DIR, "hooks", "hooks.json"), encoding="utf-8") as f:
+    HOOKS = json.load(f)["hooks"]
+
+
+def hook_timeout(script):
+    return next((hook.get("timeout") for groups in HOOKS.values() for group in groups for hook in group["hooks"]
+                 if any(str(arg).endswith("/scripts/" + script) for arg in hook.get("args", []))), None)
+
+
+import claude_command_wait  # noqa: E402
+import claude_decision  # noqa: E402
+import claude_permission  # noqa: E402
+import claude_session_start  # noqa: E402
+
+for module, script in ((claude_permission, "claude_permission.py"), (claude_decision, "claude_decision.py"),
+                       (claude_command_wait, "claude_command_wait.py")):
+    timeout = hook_timeout(script)
+    check(module.MAX_WAIT_SECONDS == 12 * 3600 and timeout is not None and timeout - module.MAX_WAIT_SECONDS >= 60,
+          f"  {script}: waits {module.MAX_WAIT_SECONDS} s, hook timeout {timeout} s")
+stop_hook = next(hook for group in HOOKS["Stop"] for hook in group["hooks"])
+check(stop_hook.get("asyncRewake") is True, "  the command waiter runs in the background and may wake Claude")
+marker = "【飞书指令】"
+check(claude_command_wait.wake_message([{"text": "x"}]).startswith(marker) and marker in claude_session_start.RULE,
+      "  the injected rule names the marker the command waiter uses")
 
 shutil.rmtree(WORK, ignore_errors=True)
 print()

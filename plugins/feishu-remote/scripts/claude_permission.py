@@ -53,8 +53,9 @@ from feishu_notify import limit_text
 # the dialog opens), so the plain-text safety net below is in place by then.
 GRACE_SECONDS = float(os.environ.get("FEISHU_PERMISSION_GRACE_SECONDS") or 5)
 POLL_SECONDS = 2
-# Keep below the hook's "timeout" in settings.json (7500 s).
-MAX_WAIT_SECONDS = 2 * 3600
+# Keep below the hook's "timeout" in hooks.json (43500 s). 12 hours: the user's call
+# (2026-11-15; 2 hours was too short, cards timed out before they were seen).
+MAX_WAIT_SECONDS = 12 * 3600
 # Background subagent prompts: five minutes, the user's call (2026-11-12).
 SUBAGENT_WAIT_SECONDS = float(os.environ.get("FEISHU_SUBAGENT_WAIT_SECONDS") or 300)
 TAIL_BYTES = 2 * 1024 * 1024

@@ -199,6 +199,17 @@ def send_feishu_card(card: dict[str, Any]) -> Optional[str]:
     return _send_to_chat("interactive", json.dumps(card, ensure_ascii=False))
 
 
+def send_reply_card(card: dict[str, Any]) -> str:
+    """Answer a command the user sent to the bot. Unlike the reminders, this is
+    sent even while notifications are switched off: the user just asked for it."""
+    return _send_to_chat("interactive", json.dumps(card, ensure_ascii=False))
+
+
+def send_reply_text(title: str, body: str) -> None:
+    """Plain-text answer to a command (sent even while notifications are off)."""
+    _send_to_chat("text", json.dumps({"text": f"{title}\n\n{body}".strip()}, ensure_ascii=False))
+
+
 def update_feishu_card(message_id: str, card: dict[str, Any]) -> None:
     """Replace a card this app sent earlier (JSON 2.0 cards are shared)."""
     _im_request(

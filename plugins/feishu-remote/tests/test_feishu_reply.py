@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 
@@ -218,6 +219,117 @@ except Exception:
     raised = True
 check(not raised and FAKE_CONFIG["allowed_open_id"] == "", "  malformed message content: logged, never raised")
 FAKE_CONFIG.update({"chat_id": "oc_test"})
+
+print("== commands the bound account sends to the bot")
+REPLIES, UPDATES = [], []
+saved = (feishu_notify.send_reply_card, feishu_notify.send_reply_text, feishu_notify.update_feishu_card,
+         L._in_background, L.session_list.sessions_card)
+feishu_notify.send_reply_card = lambda card: REPLIES.append(("card", card)) or "om_reply"
+feishu_notify.send_reply_text = lambda title, body: REPLIES.append(("text", title, body))
+feishu_notify.update_feishu_card = lambda mid, card: UPDATES.append((mid, card))
+L._in_background = lambda fn, *args: fn(*args)
+L.session_list.sessions_card = lambda: {"fake": "list"}
+message("会话", open_id="ou_me")
+message("帮助", open_id="ou_me")
+check(not REPLIES, "  nobody bound yet: commands are ignored")
+FAKE_CONFIG["allowed_open_id"] = "ou_me"
+for text in ("会话", " /Sessions ", "SESSIONS"):
+    REPLIES.clear()
+    message(text, open_id="ou_me")
+    check(REPLIES == [("card", {"fake": "list"})], f"  {text!r} -> session list card")
+REPLIES.clear()
+message("会话", open_id="ou_evil")
+check(not REPLIES, "  another account's command is ignored")
+message("会话", open_id="ou_me", chat_type="group")
+check(not REPLIES, "  a command in a group chat is ignored")
+message("帮助", open_id="ou_me")
+check(len(REPLIES) == 1 and REPLIES[0][0] == "text" and "会话：" in REPLIES[0][2] and "没有“" not in REPLIES[0][2],
+      "  帮助 -> the command list")
+REPLIES.clear()
+message("你好", open_id="ou_me")
+check(len(REPLIES) == 1 and "没有“你好”这个命令" in REPLIES[0][2] and "会话：" in REPLIES[0][2],
+      "  unknown text -> says so and lists the commands")
+
+
+def broken_list():
+    raise RuntimeError("bug")
+
+
+L.session_list.sessions_card = broken_list
+REPLIES.clear()
+message("会话", open_id="ou_me")
+check(len(REPLIES) == 1 and REPLIES[0][0] == "card"
+      and "插件内部错误（RuntimeError）" in json.dumps(REPLIES[0][1], ensure_ascii=False),
+      "  a bug in the list still gets an answer")
+L.session_list.sessions_card = lambda: {"fake": "list"}
+
+
+def refresh_click(open_id, message_id="om_list"):
+    context = SimpleNamespace(open_message_id=message_id) if message_id is not None else None
+    data = SimpleNamespace(event=SimpleNamespace(operator=SimpleNamespace(open_id=open_id), context=context,
+                                                 action=SimpleNamespace(value={"kind": "sessions"}, form_value=None)))
+    return json.loads(json.dumps(L.on_card_action(data), default=lambda o: o.__dict__))
+
+
+r = refresh_click("ou_me")
+check(r["toast"]["type"] == "info" and UPDATES == [("om_list", {"fake": "list"})],
+      "  refresh button -> the clicked card is replaced with a fresh list")
+UPDATES.clear()
+r = refresh_click("ou_evil")
+check(r["toast"]["type"] == "error" and not UPDATES, "  refresh by another account is refused")
+REPLIES.clear()
+r = refresh_click("ou_me", message_id=None)
+check(not UPDATES and REPLIES == [("card", {"fake": "list"})], "  no message id -> sent as a new card")
+
+
+def send_click(open_id, sid, text, pid=None, field="cmd_text_0", message_id="om_list"):
+    value = {"kind": "send", "field": "cmd_text_0", "sid": sid, "pid": pid}
+    data = SimpleNamespace(event=SimpleNamespace(operator=SimpleNamespace(open_id=open_id),
+                                                 context=SimpleNamespace(open_message_id=message_id),
+                                                 action=SimpleNamespace(value=value, form_value={field: text})))
+    return json.loads(json.dumps(L.on_card_action(data), default=lambda o: o.__dict__))
+
+
+print("== send box on the session list")
+UPDATES.clear()
+RB.register_command_waiter("c-ready", {"waiter_pid": os.getpid(), "waiter_created": RB.process_created(os.getpid())})
+r = send_click("ou_me", "c-ready", "  跑一下测试  ", pid=os.getpid())
+queued = RB.take_commands("c-ready")
+check(r["toast"]["type"] == "success" and "已送达" in r["toast"]["content"]
+      and [c["text"] for c in queued] == ["跑一下测试"] and queued[0]["open_id"] == "ou_me",
+      f"  waiter running -> queued (trimmed) and reported delivered: {r['toast']['content']}")
+check(UPDATES and UPDATES[-1][0] == "om_list", "  ... and the list card is refreshed")
+r = send_click("ou_me", "c-busy", "做完这个再提交", pid=os.getpid())
+check(r["toast"]["type"] == "success" and "已排队" in r["toast"]["content"] and RB.queued_commands("c-busy") == 1,
+      f"  no waiter, session alive -> queued until its turn ends: {r['toast']['content']}")
+r = send_click("ou_me", "c-gone", "还在吗", pid=999999)
+check(r["toast"]["type"] == "error" and "已经结束" in r["toast"]["content"] and RB.queued_commands("c-gone") == 0,
+      "  session ended -> refused, nothing queued")
+for args, why in ((("ou_evil", "c-ready", "rm -rf"), "another account"), (("ou_me", "../x", "x"), "unsafe session id"),
+                  (("ou_me", "c-ready", "   "), "empty command")):
+    r = send_click(*args, pid=os.getpid())
+    check(r["toast"]["type"] == "error" and RB.queued_commands("c-ready") == 0, f"  {why} -> refused, nothing queued")
+r = send_click("ou_me", "c-ready", "另一个框里的字", pid=os.getpid(), field="cmd_text_9")
+check(r["toast"]["type"] == "error" and RB.queued_commands("c-ready") == 0, "  only the button's own box is read")
+r = send_click("ou_me", "c-ready", "很长" * 800, pid=os.getpid())
+check(len(RB.take_commands("c-ready")[0]["text"]) == 1000, "  a command is capped at 1000 characters")
+FAKE_CONFIG["allowed_open_id"] = ""
+r = send_click("ou_me", "c-ready", "x", pid=os.getpid())
+check(r["toast"]["type"] == "error" and RB.queued_commands("c-ready") == 0, "  nobody bound -> refused")
+UPDATES.clear()
+r = refresh_click("ou_me")
+check(r["toast"]["type"] == "error" and not UPDATES, "  nobody bound -> refresh refused")
+L._in_background = saved[3]
+ran = threading.Event()
+L._in_background(ran.set)
+check(ran.wait(5), "  replies run on a background thread")
+told = threading.Event()
+REPLIES.clear()
+feishu_notify.send_reply_text = lambda title, body: (REPLIES.append(("text", title, body)), told.set())
+L._in_background(broken_list)  # a failing reply: logged in the thread, never raised here
+check(told.wait(5) and "出错了" in REPLIES[0][1], "  a failed reply -> the user is told it failed")
+(feishu_notify.send_reply_card, feishu_notify.send_reply_text, feishu_notify.update_feishu_card,
+ L._in_background, L.session_list.sessions_card) = saved
 
 print("== nobody bound -> every answer refused")
 p = start_waiter("s-7", ASK)

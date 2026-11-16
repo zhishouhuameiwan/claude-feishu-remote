@@ -32,8 +32,9 @@ from claude_ntfy import _as_dict, format_wrap_up, log, read_payload, session_tit
 from feishu_notify import limit_text
 
 POLL_SECONDS = 2
-# Keep below the hook's "timeout" in settings.json (29100 s).
-MAX_WAIT_SECONDS = 8 * 3600
+# Keep below the hook's "timeout" in hooks.json (43500 s). Same 12 hours as approval
+# and question cards (the user's call, 2026-11-15).
+MAX_WAIT_SECONDS = 12 * 3600
 # claude_wrapup_redirect.py runs on the same call in parallel and usually decides
 # within a second. Waiting longer than its timeout in settings.json (10 s) means a
 # slow redirect hook either leaves its verdict in time or is killed without denying.
