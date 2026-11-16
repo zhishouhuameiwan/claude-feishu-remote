@@ -17,7 +17,8 @@ Both act only on the session's own tool calls: a subagent's call (agent_id in th
 payload) is left alone, so a command never lands in a subagent's context.
 
 This runs before every tool call, so it starts lean: standard library and paths
-only, until a file for this session says there is something to do (about 60 ms).
+only, until a file for this session says there is something to do (about 70 ms in
+all, measured 2026-11-16; Python's own start-up is about 60 ms of it).
 Stdout carries only the decision JSON; errors go to hooks.log; exit code is 0.
 """
 

@@ -2,7 +2,7 @@
 
 # claude-feishu-remote
 
-**Approve Claude Code permission prompts and answer its questions from Feishu.** When you are away from your PC, everything Claude Code is waiting on you for is pushed to Feishu as a card. Tap the card and Claude carries on right away.
+**Approve Claude Code permission prompts and answer its questions from Feishu, and watch and steer running sessions.** When you are away from your PC, everything Claude Code is waiting on you for is pushed to Feishu as a card. Tap the card and Claude carries on right away. You can also see what a session is doing, get a notice when a long task ends, stop a turn that went the wrong way, and send a session instructions at any time.
 
 > Works with **Feishu (飞书, the China edition)** on **Windows**. Lark international tenants (open.larksuite.com) are not supported yet: the endpoints are Feishu's.
 
@@ -10,16 +10,20 @@
 
 | In Claude Code | In Feishu | What you can do |
 |---|---|---|
-| Permission prompt (run a command, edit a file, call a tool…) | Approval card with the tool and its full parameters | Allow / Deny / Deny with a note |
+| Permission prompt (run a command, edit a file, call a tool…) | Approval card with the tool and its full parameters | Allow / Always allow this kind in this session / Deny / Deny with a note |
 | Question dialog (AskUserQuestion) | Question card: buttons for a single-choice question, a form for several questions or multiple choice | Pick an option, or type your own answer |
 | A blocking question in the desktop app's "next step" box | Turned into a question card (see "How it works") | Same as above |
 | A plan waiting for approval, an MCP server asking for input, a session error | Text notification | Handle it at the computer |
-| You send 会话 ("sessions") to the bot in Feishu | The active sessions: status, project, model, last activity, cards still waiting for you, and a text box under each | Send a session an instruction; Claude sends its last reply back to Feishu. Tap 刷新 (refresh) to update the list |
+| You send 会话 ("sessions") to the bot in Feishu | The active sessions: status, project, model, last activity, cards still waiting for you, and a text box under each | Send a session an instruction; 查看 (view) what it is doing; 停止这一轮 (stop this turn); 设为当前会话 (make it the current session) |
+| You tap 查看 on the session list | Session detail card: this turn's prompt and running time, the tool call in progress, recent steps, task list, Claude's latest words, model, permission mode, context use | Refresh, page back through the steps, read the latest words in full, follow, stop |
+| A turn ran longer than 5 minutes (adjustable), or any turn of a session you follow ended | A completion notice with the turn's last reply, in pages when it is long | Page through it; reply to it to send the session a new instruction |
+| You "reply" in the chat to any message or card a session sent | A receipt naming the session it went to | The text goes to that session as an instruction |
 
 - If you answer on the computer first, the Feishu card switches to "handled on the computer", so nothing is answered twice.
 - A card waits up to 12 hours for you. After that it is closed and you handle the prompt at the computer.
 - Only the one Feishu account you bind can answer. Clicks and commands from anyone else are refused.
-- Approval cards show the full parameters. When they are too long to show in full, the card offers no Allow button, so you never approve something you could not read.
+- Approval cards show the full parameters. When they are too long to show in full, the card offers neither Allow nor Always allow, so you never approve something you could not read.
+- "Always allow this kind in this session" uses only the rule Claude Code itself suggests, and always adds it to this session only (never to a settings file; it ends with the session). The card spells out the exact rule, for example `Bash(npm test:*)`.
 - Until it is set up, the plugin does nothing: installed without running the setup script, Claude Code behaves exactly as without it.
 - The card buttons and messages are in Chinese.
 
@@ -41,13 +45,16 @@ flowchart LR
 - **Hooks**: the plugin hooks into Claude Code's `PermissionRequest`, `PreToolUse`, `Notification` and other events. When your answer is needed, a hook sends a Feishu card and waits.
 - **Listener**: a small background process receives card taps over Feishu's persistent connection (long connection) and hands each answer to the waiting hook. A Windows scheduled task starts it at logon and checks it every 5 minutes, so it recovers by itself. No public server and no open ports are needed.
 - **How answers reach Claude**: Allow / Deny and question answers go back through the hooks' standard return values, i.e. Claude Code's own answer channel, exactly as if you had clicked on the computer. Claude therefore treats your Feishu answer as your own input and acts on it.
+- **How stop and mid-turn instructions take effect**: the plugin has a hook before every tool call (about 70 ms each when there is nothing to do, mostly Python start-up). After you tap stop, this hook ends the turn at the session's next tool call, before the tool runs; an instruction you send to a busy session is handed to Claude at its next tool call. Both therefore act only between tool calls: while Claude writes a long text or waits for a subagent, they wait for its next tool call, at the latest the end of the turn.
+- **Why plans cannot be approved in Feishu**: measured, the desktop app's plan approval does not accept a decision from a hook, so a plan waiting for approval gets a text notification and is approved at the computer.
 - **Why the "next step" box is turned into a question dialog**: an outside program can only deliver an answer to the "next step" box as a background notification, which Claude Code marks as "not user input, not an approval". That is a deliberate anti-spoofing safeguard and cannot be worked around. So the plugin stops a blocking "next step" box that carries a question and has Claude ask the same question with AskUserQuestion instead, where your Feishu answer counts. The plugin also tells Claude this rule at the start of every session.
 
 ## Before you start
 
 - **Windows 10/11 and Feishu (China edition) only**; Lark international is not supported yet.
 - **Each computer needs its own Feishu app.** Feishu's persistent connection does not broadcast: when two computers connect with the same app, each tap goes to one of them at random. Two computers of the same person also need two apps.
-- **Security**: whoever controls the Feishu account you bind can approve actions on this computer from Feishu, and send instructions to running sessions. In a session that skips permission prompts or runs in auto mode, what a Feishu instruction leads to runs without an approval card too. Bind only your own account and make the app available only to yourself. Credentials are stored only on this computer, in `%LOCALAPPDATA%\FeishuRemote\config.json`.
+- **Security**: whoever controls the Feishu account you bind can approve actions on this computer from Feishu, and send instructions to running sessions or stop them. In a session that skips permission prompts or runs in auto mode, what a Feishu instruction leads to runs without an approval card too. Bind only your own account and make the app available only to yourself. Credentials are stored only on this computer, in `%LOCALAPPDATA%\FeishuRemote\config.json`.
+- **Session content goes to Feishu**: the session detail card and completion notices send this turn's prompt, the commands run and Claude's reply to your Feishu chat (to the bound account only). A secret in a command or a reply shows up in Feishu too. A turn longer than 5 minutes sends a completion notice by default; send 通知 关 ("notify off") to the bot to stop that. The full reply is kept in the local data folder for 7 days, for the page buttons.
 - Anything you could not have Claude do by saying it on the computer (for example typing a password for you), you cannot have it do through Feishu either.
 
 ## Installation
@@ -118,12 +125,17 @@ Open a new Claude Code session. Sessions that were already open, including those
 
 - **See the active sessions and send them instructions**: send 会话 to the bot in Feishu to get a card with the active sessions.
   - Active means working, waiting for you (a permission prompt, a question or an open card), or idle but still able to take an instruction (its last turn ended less than 12 hours ago). Other idle sessions are only counted at the bottom.
-  - Sessions waiting for you come first. Each shows its project, current model, last activity, Feishu cards still waiting for your answer, and queued instructions.
-  - Each session has a text box: type an instruction and tap 发送 (send). An idle session starts on it right away; for a working session it is queued and delivered when the current turn ends. When that turn is done, Claude's last reply is sent back to Feishu.
+  - Sessions waiting for you come first; one card lists at most 10 (the rest, the least urgent, are only counted). Each shows its project, current model, last activity, Feishu cards still waiting for your answer, and queued instructions.
+  - Each session has a text box: type an instruction and tap 发送 (send). An idle session starts on it right away; a working session gets it at its next tool call (mid-turn), at the latest when the turn ends. When it is done, Claude's last reply is sent back to Feishu.
   - The instruction reaches the session as a notification, which Claude Code does not count as your own input (like replies to the "next step" box; this protection cannot be bypassed). So Claude does what needs no approval right away, and for anything that needs your decision (commit, push, delete) it first sends a question card that you answer in Feishu.
-  - Only text instructions work: slash commands such as `/compact` or `/model` do not. Only sessions opened after installing 1.1.0 can take instructions.
-  - A session takes the next instruction only after a turn ends normally: after a turn interrupted with Esc or ended by an API error, it takes instructions again once its next turn ends (instructions sent meanwhile are queued). An instruction still queued after 12 hours is dropped.
+  - Only text instructions work: slash commands such as `/compact` or `/model` do not. Only sessions opened after installing 1.1.0 can take instructions; stop and mid-turn instructions need sessions opened after installing 1.2.0.
+  - After a turn interrupted with Esc or ended by an API error, a session takes instructions again once its next turn ends (instructions sent meanwhile are queued). A turn stopped from Feishu is different: the session takes instructions right after it stops. An instruction still queued after 12 hours is dropped.
   - The list comes from Claude Code's own `claude agents --json`, so the listener must be able to run `claude`. Send 帮助 ("help") for all commands.
+- **See what a session is doing**: tap 查看 on the session list for the session detail card (see the table above). 刷新 refreshes it, 更早的步骤 pages back. After 关注 (follow), every turn of that session sends its last reply; for other sessions only turns longer than 5 minutes do. Send 通知 10 to the bot to make that 10 minutes, 通知 关 to turn it off, 通知 to see the setting. Long replies come in pages: tap 下一页 (next page).
+- **Stop a running turn**: tap 停止这一轮 on the session list or the detail card. The session stops at its next tool call and Feishu gets a "stopped" notice. If it is waiting on an approval or a question, that card is answered "stop" and Claude is told to end the turn. Only this turn stops: new instructions from the computer or from Feishu are handled as usual afterwards. Stop does nothing on a session that is already idle, and a stop that no tool call and no turn end reached within 30 minutes lapses.
+- **Send a session instructions straight from the chat**:
+  - "Reply" to any message or card a session sent (approval cards, completion notices, detail cards, receipts): the reply goes to that session. Even a command word such as 会话 in a reply is an instruction for the session.
+  - Or tap 设为当前会话 (make it the current session) on the session list or a detail card: plain text you type in the chat then goes to that session. It is cleared after 30 minutes without use, and every message gets a receipt naming the session. The command words 会话, 帮助 and 通知 stay commands.
 - **Pause notifications**: `python <plugin folder>\scripts\notify_switch.py off`; use `on` to resume. Commands you send still get an answer while notifications are paused.
 - **Receive on another Feishu account**: run `setup.ps1 -Rebind`.
 - **Switch to another Feishu app**: run `setup.ps1 -Reconfigure`. The old binding is cleared automatically; bind again.
