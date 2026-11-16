@@ -129,13 +129,18 @@ def on_message(data: Any) -> None:
 
 # ---------------------------------------------------------------- commands
 
-# What the bound user can send to the bot (case and a leading "/" are ignored).
-COMMANDS = {"会话": "sessions", "sessions": "sessions", "帮助": "help", "help": "help"}
+# What the bound user can send to the bot (case and a leading "/" are ignored; the
+# first word is the command, the rest its argument).
+COMMANDS = {"会话": "sessions", "sessions": "sessions", "帮助": "help", "help": "help",
+            "通知": "notify", "notify": "notify"}
 HELP_TITLE = "Claude 远程回复 · 可用命令"
 HELP_BODY = ("会话：列出本机的活跃会话（工作中、等你处理、空闲但能接收指令的），"
-             "每个会话下面有输入框，可以直接给它发指令，Claude 做完会把最后的回复发回这里\n"
+             "每个会话下面有输入框，可以直接给它发指令，Claude 做完会把最后的回复发回这里；"
+             "点“查看”看它正在做什么，详情卡上可以“关注”它（之后每轮结束都推送）\n"
+             "通知 [分钟数|关]：任何一轮运行超过这么久，结束时把最后的回复推到这里（默认 5 分钟）\n"
              "帮助：显示这条说明\n\n"
              "回答 Claude 的审批和提问请直接在卡片上操作；直接发在聊天里的文字不会转给 Claude。")
+NOTIFY_MAX_MINUTES = 24 * 60
 
 
 def _in_background(fn: Any, *args: Any) -> None:
@@ -164,13 +169,39 @@ def _sessions_card() -> dict[str, Any]:
 
 
 def handle_command(text: str) -> None:
-    command = COMMANDS.get(text.strip().lstrip("/").lower())
+    word, _, argument = text.replace("\u3000", " ").strip().lstrip("/").partition(" ")  # full-width space
+    command = COMMANDS.get(word.lower())
+    if command is None and word.startswith("通知"):  # "通知10": no space needed in Chinese
+        command, argument = "notify", word[len("通知"):]
+    argument = argument.strip()
     log.info("command %s", command or "unknown")
-    if command == "sessions":
+    if command == "sessions" and not argument:
         feishu_notify.send_reply_card(_sessions_card())
+        return
+    if command == "notify":
+        feishu_notify.send_reply_text("Claude 远程回复 · 完成通知", set_notify(argument))
         return
     intro = "" if command == "help" else f"没有“{short(text, 30)}”这个命令。\n\n"
     feishu_notify.send_reply_text(HELP_TITLE, intro + HELP_BODY)
+
+
+def set_notify(argument: str) -> str:
+    """The "通知" command: show or change after how many minutes a turn's end is reported."""
+    if argument.lower() in ("关", "关闭", "off", "0"):
+        feishu_notify.write_config_field("notify_after_minutes", "0")
+        return "已关闭：一轮结束时不再推送（飞书指令的结果和关注的会话照常推送）。发“通知 5”可以重新打开。"
+    if argument:
+        try:
+            minutes = float(argument)
+        except ValueError:
+            minutes = -1
+        if not 0 < minutes <= NOTIFY_MAX_MINUTES:
+            return f"“{short(argument, 20)}”不是 {NOTIFY_MAX_MINUTES} 以内的正分钟数。例：通知 10；通知 关"
+        feishu_notify.write_config_field("notify_after_minutes", f"{minutes:g}")
+        return f"已设置：运行超过 {minutes:g} 分钟的一轮，结束时把最后的回复推送到这里。"
+    current = feishu_notify.read_config_field("notify_after_minutes") or "5"
+    state = "已关闭" if current in ("0", "0.0") else f"运行超过 {current} 分钟的一轮结束时推送"
+    return f"现在：{state}。\n修改：通知 10（改成 10 分钟）；通知 关（关闭）。"
 
 
 def refresh_sessions(message_id: str) -> None:
@@ -288,6 +319,91 @@ def handle_send(open_id: str, value: dict[str, Any], form_value: dict[str, Any],
     return _response("success", "已排队：这个会话现在没在等指令，它这一轮结束后就会收到")
 
 
+def _allowed(open_id: str, what: str) -> bool:
+    allowed = feishu_notify.read_config_field("allowed_open_id")
+    if allowed and open_id == allowed:
+        return True
+    log.warning("rejected %s from open_id=%s", what, open_id)
+    return False
+
+
+def _detail_card(session_id: str, page: int) -> dict[str, Any]:
+    try:
+        return session_list.detail_card(session_id, page)
+    except Exception as exc:  # a bug here must still answer the user
+        log.exception("session detail failed")
+        return session_list.error_card(f"插件内部错误（{type(exc).__name__}），详情见 listener.log。")
+
+
+def show_detail(session_id: str, page: int, message_id: str, new_card: bool) -> None:
+    card = _detail_card(session_id, page)
+    if message_id and not new_card:
+        feishu_notify.update_feishu_card(message_id, card)
+    else:
+        feishu_notify.send_reply_card(card)
+
+
+def handle_detail(open_id: str, value: dict[str, Any], message_id: str) -> Any:
+    """"查看" on the session list (a new detail card), or refresh / older / newer steps
+    on a detail card (updated in place). Built in the background: claude agents is slow."""
+    if not _allowed(open_id, "detail"):
+        return _response("error", "你没有权限查看会话")
+    session_id = str(value.get("sid") or "")
+    page = value.get("page", 0)
+    if not reply_bridge.valid_id(session_id) or not isinstance(page, int) or isinstance(page, bool) or page < 0:
+        return _response("error", "这个按钮不认识")
+    _in_background(show_detail, session_id, page, message_id, value.get("open") is True)
+    return _response("info", "正在读取…")
+
+
+def handle_follow(open_id: str, value: dict[str, Any], message_id: str) -> Any:
+    if not _allowed(open_id, "follow"):
+        return _response("error", "你没有权限关注会话")
+    session_id = str(value.get("sid") or "")
+    if not reply_bridge.valid_id(session_id) or not isinstance(value.get("on"), bool):
+        return _response("error", "这个按钮不认识")
+    reply_bridge.set_following(session_id, value["on"])
+    log.info("session %s followed: %s", session_id, value["on"])
+    _in_background(show_detail, session_id, 0, message_id, False)
+    return _response("success", "已关注：它每轮结束都会推送到这里" if value["on"] else "已取消关注")
+
+
+def send_latest_text(session_id: str) -> None:
+    doc = session_list.latest_text_doc(session_id)
+    if doc is None:
+        feishu_notify.send_reply_text("Claude 远程回复", "找不到这个会话的记录文件。")
+        return
+    doc_id = reply_bridge.save_doc(doc)
+    feishu_notify.send_reply_card(decision_card.paged_card(doc_id, doc, 0))
+
+
+def handle_fulltext(open_id: str, value: dict[str, Any]) -> Any:
+    if not _allowed(open_id, "full text"):
+        return _response("error", "你没有权限查看会话")
+    session_id = str(value.get("sid") or "")
+    if not reply_bridge.valid_id(session_id):
+        return _response("error", "这个按钮不认识")
+    _in_background(send_latest_text, session_id)
+    return _response("info", "正在读取…")
+
+
+def handle_page(open_id: str, value: dict[str, Any]) -> Any:
+    """Page buttons of a long reply: the stored text is read back and the card replaced."""
+    if not _allowed(open_id, "page"):
+        return _response("error", "你没有权限查看")
+    page = value.get("page")
+    if not isinstance(page, int) or isinstance(page, bool) or page < 0:
+        return _response("error", "这个按钮不认识")
+    doc_id = str(value.get("doc") or "")
+    doc = reply_bridge.load_doc(doc_id)
+    if doc is None:
+        return _response("error", "这段内容已经过期（只保存 7 天）")
+    return _response("info", f"第 {page + 1} 页", decision_card.paged_card(doc_id, doc, page))
+
+
+VIEW_KINDS = ("detail", "follow", "fulltext", "page")
+
+
 def _option_label(question: dict[str, Any], picked: Any) -> Optional[str]:
     """Map a button index (int) or dropdown value ("0", "1", ...) to the offered label."""
     if isinstance(picked, str) and picked.isdigit():
@@ -390,10 +506,19 @@ def on_card_action(data: Any) -> Any:
             # A dropdown inside a form changed; only the submit button counts.
             from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
             return P2CardActionTriggerResponse({})
-        if value.get("kind") in ("sessions", "send"):
+        kind = value.get("kind")
+        if kind in ("sessions", "send") or kind in VIEW_KINDS:
             message_id = str(getattr(getattr(event, "context", None), "open_message_id", "") or "")
-            if value["kind"] == "send":
+            if kind == "send":
                 return handle_send(open_id, value, action.form_value or {}, message_id)
+            if kind == "detail":
+                return handle_detail(open_id, value, message_id)
+            if kind == "follow":
+                return handle_follow(open_id, value, message_id)
+            if kind == "fulltext":
+                return handle_fulltext(open_id, value)
+            if kind == "page":
+                return handle_page(open_id, value)
             return handle_sessions_click(open_id, message_id)
         return handle_answer(open_id, value, action.form_value or {})
     except Exception:
@@ -415,7 +540,7 @@ def _connected(client: Any) -> bool:
 
 # Everything the listener imports: a folder missing any of them (half unzipped) is not moved to.
 LISTENER_FILES = ("feishu_listener.py", "paths.py", "reply_bridge.py", "feishu_notify.py", "decision_card.py",
-                  "session_list.py")
+                  "session_list.py", "session_detail.py")
 
 
 def _same_folder(a: str, b: str) -> bool:

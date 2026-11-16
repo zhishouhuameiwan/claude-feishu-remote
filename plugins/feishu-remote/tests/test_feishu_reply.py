@@ -319,6 +319,88 @@ check(r["toast"]["type"] == "error" and RB.queued_commands("c-ready") == 0, "  n
 UPDATES.clear()
 r = refresh_click("ou_me")
 check(r["toast"]["type"] == "error" and not UPDATES, "  nobody bound -> refresh refused")
+FAKE_CONFIG["allowed_open_id"] = "ou_me"
+
+
+def view_click(open_id, value, message_id="om_detail"):
+    data = SimpleNamespace(event=SimpleNamespace(operator=SimpleNamespace(open_id=open_id),
+                                                 context=SimpleNamespace(open_message_id=message_id),
+                                                 action=SimpleNamespace(value=value, form_value=None)))
+    return json.loads(json.dumps(L.on_card_action(data), default=lambda o: o.__dict__))
+
+
+print("== viewing a session: detail card, follow, full text, pages")
+saved_detail = (L.session_list.detail_card, L.session_list.latest_text_doc)
+DETAILS = []
+L.session_list.detail_card = lambda sid, page=0: DETAILS.append((sid, page)) or {"fake": "detail", "page": page}
+UPDATES.clear()
+REPLIES.clear()
+r = view_click("ou_me", {"kind": "detail", "sid": "v-1", "open": True}, message_id="om_list")
+check(r["toast"]["type"] == "info" and REPLIES == [("card", {"fake": "detail", "page": 0})] and not UPDATES,
+      "  查看 on the list -> a new detail card (the list stays)")
+REPLIES.clear()
+r = view_click("ou_me", {"kind": "detail", "sid": "v-1", "page": 2})
+check(UPDATES == [("om_detail", {"fake": "detail", "page": 2})] and not REPLIES and DETAILS[-1] == ("v-1", 2),
+      "  refresh / older steps -> the detail card is updated in place")
+UPDATES.clear()
+for value, why in (({"kind": "detail", "sid": "../x"}, "unsafe id"), ({"kind": "detail", "sid": "v-1", "page": -1},
+                   "negative page"), ({"kind": "detail", "sid": "v-1", "page": "2"}, "page not a number"),
+                   ({"kind": "detail", "sid": "v-1", "page": True}, "page a bool")):
+    r = view_click("ou_me", value)
+    check(r["toast"]["type"] == "error" and not UPDATES and not REPLIES, f"  {why} -> refused")
+r = view_click("ou_evil", {"kind": "detail", "sid": "v-1", "open": True})
+check(r["toast"]["type"] == "error" and not REPLIES, "  another account -> refused")
+r = view_click("ou_me", {"kind": "follow", "sid": "v-1", "on": True})
+check(r["toast"]["type"] == "success" and RB.following("v-1") and UPDATES[-1][0] == "om_detail",
+      "  follow -> flag set, detail card refreshed")
+r = view_click("ou_evil", {"kind": "follow", "sid": "v-1", "on": False})
+check(r["toast"]["type"] == "error" and RB.following("v-1"), "  another account cannot unfollow")
+r = view_click("ou_me", {"kind": "follow", "sid": "v-1", "on": "no"})
+check(r["toast"]["type"] == "error" and RB.following("v-1"), "  'on' must be a bool")
+r = view_click("ou_me", {"kind": "follow", "sid": "v-1", "on": False})
+check(r["toast"]["type"] == "success" and not RB.following("v-1"), "  unfollow")
+L.session_list.latest_text_doc = lambda sid: {"header": "h", "title": "t", "lines": [], "text": "全文" * 2000}
+REPLIES.clear()
+r = view_click("ou_me", {"kind": "fulltext", "sid": "v-1"})
+sent_card = REPLIES[-1][1] if REPLIES else {}
+next_button = [e for e in sent_card.get("body", {}).get("elements", []) if e.get("tag") == "button"]
+check(r["toast"]["type"] == "info" and next_button and next_button[0]["behaviors"][0]["value"]["page"] == 1,
+      "  full text -> a paged card with the first page")
+doc_id = next_button[0]["behaviors"][0]["value"]["doc"] if next_button else ""
+r = view_click("ou_me", {"kind": "page", "doc": doc_id, "page": 1})
+check(r["toast"]["content"] == "第 2 页" and r["card"]["data"]["body"]["elements"][0]["text"]["content"].startswith("第 2/2 页"),
+      "  next page -> the card is replaced in the click's answer")
+r = view_click("ou_me", {"kind": "page", "doc": "gone0000", "page": 0})
+check(r["toast"]["type"] == "error" and "过期" in r["toast"]["content"], "  a removed text -> says it expired")
+for value, why in (({"kind": "page", "doc": doc_id, "page": -1}, "negative page"),
+                   ({"kind": "page", "doc": "../x", "page": 0}, "unsafe id")):
+    r = view_click("ou_me", value)
+    check(r["toast"]["type"] == "error", f"  {why} -> refused")
+r = view_click("ou_evil", {"kind": "page", "doc": doc_id, "page": 1})
+check(r["toast"]["type"] == "error" and not r.get("card"), "  another account cannot read pages")
+L.session_list.latest_text_doc = lambda sid: None
+REPLIES.clear()
+view_click("ou_me", {"kind": "fulltext", "sid": "v-1"})
+check(REPLIES and REPLIES[-1][0] == "text" and "找不到" in REPLIES[-1][2], "  full text of an unknown session -> says so")
+L.session_list.detail_card, L.session_list.latest_text_doc = saved_detail
+
+print("== 通知: after how many minutes a turn's end is reported")
+for text, expect, stored in (("通知 10", "已设置：运行超过 10 分钟", "10"), ("通知 2.5", "2.5 分钟", "2.5"),
+                             ("通知 关", "已关闭", "0"), ("/notify off", "已关闭", "0"),
+                             ("通知 abc", "不是 1440 以内的正分钟数", "0"), ("通知 -3", "不是", "0"),
+                             ("通知 99999", "不是", "0"), ("通知 0.5", "0.5 分钟", "0.5"),
+                             ("通知10", "已设置：运行超过 10 分钟", "10"), ("通知\u3000关", "已关闭", "0"),
+                             ("通知 5", "5 分钟", "5")):
+    REPLIES.clear()
+    message(text, open_id="ou_me")
+    check(len(REPLIES) == 1 and expect in REPLIES[0][2] and FAKE_CONFIG.get("notify_after_minutes") == stored,
+          f"  {text!r} -> {REPLIES[0][2][:30] if REPLIES else None!r}, stored {FAKE_CONFIG.get('notify_after_minutes')!r}")
+REPLIES.clear()
+message("通知", open_id="ou_me")
+check("现在：运行超过 5 分钟" in REPLIES[0][2], "  '通知' alone shows the setting")
+REPLIES.clear()
+message("通知 1", open_id="ou_evil")
+check(not REPLIES and FAKE_CONFIG.get("notify_after_minutes") == "5", "  another account cannot change it")
 L._in_background = saved[3]
 ran = threading.Event()
 L._in_background(ran.set)
@@ -330,6 +412,7 @@ L._in_background(broken_list)  # a failing reply: logged in the thread, never ra
 check(told.wait(5) and "出错了" in REPLIES[0][1], "  a failed reply -> the user is told it failed")
 (feishu_notify.send_reply_card, feishu_notify.send_reply_text, feishu_notify.update_feishu_card,
  L._in_background, L.session_list.sessions_card) = saved
+FAKE_CONFIG["allowed_open_id"] = ""  # unbound again, as before the viewing tests
 
 print("== nobody bound -> every answer refused")
 p = start_waiter("s-7", ASK)

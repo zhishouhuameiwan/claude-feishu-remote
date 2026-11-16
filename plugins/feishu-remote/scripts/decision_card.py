@@ -237,11 +237,14 @@ SESSIONS_HEADER = "Claude Code · 活跃会话"
 
 def sessions_card(summary: str, entries: list[dict[str, Any]], footer: str) -> dict[str, Any]:
     """Answer to the "会话" command. entries: {"text": one session, already formatted
-    and size-bounded by session_list.py, "send": None or {"sid", "pid"}: a box for
-    sending that session a command}. A button at the end refreshes this card."""
+    and size-bounded by session_list.py, "sid": its id for the "查看" button (None: no
+    button), "send": None or {"sid", "pid"}: a box for sending that session a command}.
+    A button at the end refreshes this card."""
     elements = [_text(summary)]
     for index, entry in enumerate(entries):
         elements += [{"tag": "hr"}, _text(entry["text"])]
+        if entry.get("sid"):
+            elements.append(_button("查看", {"kind": "detail", "sid": entry["sid"], "open": True}, False))
         if entry.get("send"):
             elements.append(_send_form(index, entry["send"]))
     if footer:
@@ -273,6 +276,85 @@ def _send_form(index: int, target: dict[str, Any]) -> dict[str, Any]:
             },
         ],
     }
+
+
+# ---------------------------------------------------------------- long text, a page at a time
+
+PAGE_CHARS = 3000  # 3000 CJK characters escaped twice stay near 10 KB, far under Feishu's 30 KB
+
+
+def split_pages(text: str) -> list[str]:
+    """Pages of at most PAGE_CHARS, cut at a line break near the end of a page when there is one."""
+    pages, start = [], 0
+    while len(text) - start > PAGE_CHARS:
+        end = start + PAGE_CHARS
+        cut = text.rfind("\n", end - 600, end)
+        cut = cut + 1 if cut > start else end
+        pages.append(text[start:cut])
+        start = cut
+    pages.append(text[start:])
+    return pages
+
+
+def paged_card(doc_id: str, doc: dict[str, Any], page: int) -> dict[str, Any]:
+    """One page of a stored reply (reply_bridge.save_doc). doc: header, title, lines
+    (short facts above the text, already bounded), text (all of it), template."""
+    pages = split_pages(str(doc.get("text") or ""))
+    page = min(max(page, 0), len(pages) - 1)
+    elements = [_text(line) for line in doc.get("lines") or []]
+    if len(pages) > 1:
+        elements.append(_text(f"第 {page + 1}/{len(pages)} 页（共 {len(str(doc.get('text') or ''))} 字）"))
+    elements.append(_text(pages[page] or "（没有文字）"))
+    if page > 0:
+        elements.append(_button("上一页", {"kind": "page", "doc": doc_id, "page": page - 1}, False))
+    if page < len(pages) - 1:
+        elements.append(_button("下一页", {"kind": "page", "doc": doc_id, "page": page + 1}, True))
+    return _card(str(doc.get("header") or "Claude Code"), str(doc.get("title") or ""),
+                 str(doc.get("template") or "green"), elements)
+
+
+# ---------------------------------------------------------------- session detail
+
+DETAIL_HEADER = "Claude Code · 会话详情"
+TASK_MARKS = {"completed": "✓", "in_progress": "▶", "pending": "○"}
+MAX_TASKS = 20
+
+
+def detail_card(info: dict[str, Any]) -> dict[str, Any]:
+    """info (built and bounded by session_list.detail_info): sid, title, summary lines,
+    turn lines, pending tools, tasks [(content, status)], latest text, steps (this
+    page's lines), page, has_older, following."""
+    sid = info["sid"]
+    elements = [_text("\n".join(info.get("summary") or []))]
+    if info.get("turn"):
+        elements += [{"tag": "hr"}, _text("\n".join(info["turn"]))]
+    if info.get("pending"):
+        elements.append(_text("正在执行：\n" + "\n".join(f"· {line}" for line in info["pending"])))
+    tasks = info.get("tasks") or []
+    if tasks:
+        done = sum(1 for _, status in tasks if status == "completed")
+        lines = [f"{TASK_MARKS.get(status, '○')} {limit_text(content, 80)}" for content, status in tasks[:MAX_TASKS]]
+        if len(tasks) > MAX_TASKS:
+            lines.append(f"……还有 {len(tasks) - MAX_TASKS} 项")
+        elements.append(_text(f"任务清单（完成 {done}/{len(tasks)}）：\n" + "\n".join(lines)))
+    if info.get("latest_text"):
+        elements += [{"tag": "hr"}, _text(f"Claude 最新的话：\n{info['latest_text']}")]
+    page = int(info.get("page") or 0)
+    if info.get("steps"):
+        label = "最近几步" if page == 0 else f"更早的步骤（第 {page + 1} 页）"
+        elements += [{"tag": "hr"}, _text(f"{label}（新的在上）：\n" + "\n".join(info["steps"]))]
+    elements.append({"tag": "hr"})
+    elements.append(_button("刷新", {"kind": "detail", "sid": sid, "page": 0}, True))
+    if info.get("has_older"):
+        elements.append(_button("更早的步骤", {"kind": "detail", "sid": sid, "page": page + 1}, False))
+    if page > 0:
+        elements.append(_button("更新的步骤", {"kind": "detail", "sid": sid, "page": page - 1}, False))
+    if info.get("latest_text"):
+        elements.append(_button("看 Claude 最新的话全文", {"kind": "fulltext", "sid": sid}, False))
+    following = bool(info.get("following"))
+    elements.append(_button("取消关注" if following else "关注（每轮结束都推送）",
+                            {"kind": "follow", "sid": sid, "on": not following}, False))
+    return _card(DETAIL_HEADER, str(info.get("title") or ""), "blue", elements)
 
 
 def result_card(info: dict[str, Any], status: str, template: str) -> dict[str, Any]:

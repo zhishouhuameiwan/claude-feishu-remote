@@ -31,6 +31,7 @@ from typing import Any, Optional
 
 import decision_card
 import reply_bridge
+import session_detail
 from decision_card import short
 from feishu_notify import limit_text
 
@@ -237,7 +238,9 @@ def build_card(rows: list[dict[str, Any]], now: float) -> dict[str, Any]:
     if len(rows) > len(active):
         notes.append(f"另有 {len(rows) - len(active)} 个空闲会话没有列出：它们收不到指令"
                      "（上一轮结束已超过 12 小时，或是装新版插件之前开的会话）。")
-    entries = [{"text": format_row(row, now), "send": _send_target(row)} for row in active[:MAX_ENTRIES]]
+    entries = [{"text": format_row(row, now), "send": _send_target(row),
+                "sid": row["session_id"] if reply_bridge.valid_id(row["session_id"]) else None}
+               for row in active[:MAX_ENTRIES]]
     if not active:
         entries = [{"text": "现在没有活跃的会话。", "send": None}]
     return decision_card.sessions_card(summary, entries, "\n".join(notes))
@@ -245,6 +248,107 @@ def build_card(rows: list[dict[str, Any]], now: float) -> dict[str, Any]:
 
 def error_card(reason: str) -> dict[str, Any]:
     return decision_card.sessions_card(f"读取会话列表失败：{reason}", [], "")
+
+
+# ---------------------------------------------------------------- one session in detail
+
+MODE_LABELS = {"default": "默认（逐项审批）", "manual": "手动审批", "acceptEdits": "自动接受编辑", "plan": "计划模式",
+               "auto": "自动模式", "dontAsk": "不询问", "bypassPermissions": "跳过所有审批"}
+BUSY = {"busy", "working", "waiting", "blocked"}
+PROMPT_CHARS, PENDING_CHARS, LATEST_CHARS, STEP_CHARS = 500, 200, 1500, 160
+MAX_PENDING = 5
+
+
+def _clock(when: Optional[float], now: float) -> str:
+    if when is None:
+        return "?"
+    same_day = time.localtime(when)[:3] == time.localtime(now)[:3]
+    return time.strftime("%H:%M" if same_day else "%m-%d %H:%M", time.localtime(when))
+
+
+def duration_text(seconds: float) -> str:
+    seconds = max(0, seconds)
+    if seconds < 60:
+        return f"{int(seconds)} 秒"
+    if seconds < 3600:
+        return f"{int(seconds // 60)} 分钟"
+    return f"{int(seconds // 3600)} 小时 {int(seconds % 3600 // 60)} 分钟"
+
+
+def _live_entry(session_id: str) -> tuple[Optional[dict[str, Any]], str]:
+    """The session as claude agents lists it (None if not listed), and why it could not be read."""
+    try:
+        for entry in run_agents():
+            if str(entry.get("sessionId") or "") == session_id:
+                return entry, ""
+        return None, ""
+    except SessionListError as exc:
+        return None, str(exc)
+
+
+def detail_info(session_id: str, page: int, now: float) -> dict[str, Any]:
+    """What decision_card.detail_card shows; every text bounded here."""
+    path = transcript_of(session_id)
+    if path is None:
+        raise SessionListError("找不到这个会话的记录文件。")
+    live, agents_error = _live_entry(session_id)
+    model = newest_model(path)
+    v = session_detail.view(path, model)
+    status = str((live or {}).get("status") or (live or {}).get("state") or "")
+    if live:
+        row = {"listed": True, "status": status, "waiting_for": str(live.get("waitingFor") or ""),
+               "commandable": reply_bridge.command_waiter_alive(session_id), "kind": str(live.get("kind") or "")}
+        state = _state(row)
+    else:
+        state = "状态未知：" + short(agents_error, 80) if agents_error else "claude agents 没有列出（可能已结束）"
+    title = str((live or {}).get("name") or "")
+    tokens = v["context_tokens"]
+    context = (f"上下文：约 {tokens / 1000:.0f}k / {v['context_window'] // 1000}k"
+               f"（{tokens * 100 // v['context_window']}%）") if tokens else "上下文：未知"
+    mode = MODE_LABELS.get(v["permission_mode"], short(v["permission_mode"], 30) or "未知")
+    cwd = str((live or {}).get("cwd") or "")
+    summary = [f"【{state}】{short(title or '（未命名会话）', 60)}"]
+    summary += [f"项目：{short(cwd, 120)}"] if cwd else []
+    summary.append(f"模型：{short(model, 60) or '未知'} · 权限模式：{mode} · {context}")
+    summary.append(f"最近活动：{_ago(v['last_activity'], now)} · 查询时间 {time.strftime('%H:%M:%S', time.localtime(now))}")
+    busy = status in BUSY
+    turn = []
+    if v["prompt"]:
+        when = f"（{_clock(v['prompt_at'], now)}）" if v["prompt_at"] else ""
+        turn.append(f"最近一次输入{when}：{limit_text(v['prompt'], PROMPT_CHARS)}")
+    if busy and v["turn_start"]:
+        at_least = "" if v["turn_complete"] else "至少 "
+        turn.append(f"这一轮已运行 {at_least}{duration_text(now - v['turn_start'])}"
+                    f"（从 {_clock(v['turn_start'], now)} 开始）")
+    pending = [limit_text(line, PENDING_CHARS) for line in v["pending"][:MAX_PENDING]] if busy else []
+    first = page * session_detail.STEP_PAGE
+    shown = v["steps"][first:first + session_detail.STEP_PAGE]
+    steps = [f"{_clock(s['at'], now)} {s['who']}：{short(s['text'], STEP_CHARS)}" for s in shown]
+    return {"sid": session_id, "title": title, "summary": summary, "turn": turn, "pending": pending,
+            "tasks": [(short(c, 80), s) for c, s in v["tasks"]], "latest_text": limit_text(v["latest_text"], LATEST_CHARS),
+            "steps": steps, "page": page, "has_older": len(v["steps"]) > first + len(shown),
+            "following": reply_bridge.following(session_id)}
+
+
+def detail_card(session_id: str, page: int = 0) -> dict[str, Any]:
+    """The card for "查看": the session in detail, or why it could not be read."""
+    try:
+        return decision_card.detail_card(detail_info(session_id, max(0, page), time.time()))
+    except (SessionListError, OSError) as exc:
+        reason = str(exc) if isinstance(exc, SessionListError) else f"读取会话记录失败（{type(exc).__name__}）。"
+        return decision_card.sessions_card(f"查看会话失败：{reason}", [], "")
+
+
+def latest_text_doc(session_id: str) -> Optional[dict[str, Any]]:
+    """Claude's newest text in full, as a document for decision_card.paged_card."""
+    path = transcript_of(session_id)
+    if path is None:
+        return None
+    live, _ = _live_entry(session_id)
+    text = session_detail.latest_text(session_detail.main_line(session_detail.read_tail(path)))
+    title = str((live or {}).get("name") or "")
+    return {"header": "Claude Code · 最新的话", "title": title, "template": "blue",
+            "lines": [f"会话：{limit_text(title, 100)}"] if title else [], "text": text or "（没有文字）"}
 
 
 def sessions_card() -> dict[str, Any]:

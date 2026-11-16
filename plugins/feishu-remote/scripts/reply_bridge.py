@@ -16,6 +16,10 @@ replies/cmd-<sid>.<ns>-<hex>.json  one queued command; "." cannot occur in a ses
                                    so "cmd-<sid>.*" never matches another session's files
 replies/cmdwait-<sid>.json  the session's command waiter (newest one wins)
 replies/session-<sid>.relay the running turn was started from Feishu: report its last reply
+
+Viewing (session_detail.py, claude_command_wait.py):
+replies/doc-<id>.json       a long reply, shown a page at a time on a card
+replies/follow-<sid>.flag   the user follows this session: every turn's last reply goes to Feishu
 """
 
 from __future__ import annotations
@@ -335,6 +339,48 @@ def take_relay(session_id: str) -> Optional[float]:
     except FileNotFoundError:
         return None
     return marked
+
+
+# ---------------------------------------------------------------- long replies, followed sessions
+
+MAX_DOC_CHARS = 200_000  # about 67 pages; more is not read on a phone
+
+
+def save_doc(doc: dict[str, Any]) -> str:
+    """Keep a reply too long for one card: the paged card reads it back by id.
+    Removed by cleanup() with the other files after 7 days."""
+    text = str(doc.get("text") or "")
+    if len(text) > MAX_DOC_CHARS:
+        doc = {**doc, "text": f"{text[:MAX_DOC_CHARS]}\n……（后面还有 {len(text) - MAX_DOC_CHARS} 字没有保存）"}
+    doc_id = new_id()
+    _write_json_atomic(_path(f"doc-{doc_id}.json"), doc)
+    return doc_id
+
+
+def load_doc(doc_id: str) -> Optional[dict[str, Any]]:
+    return _read_json(_path(f"doc-{doc_id}.json")) if _is_safe(doc_id) else None
+
+
+def set_following(session_id: str, on: bool) -> None:
+    """Followed sessions send every turn's last reply to Feishu (claude_command_wait.py)."""
+    path = _path(f"follow-{_safe(session_id)}.flag")
+    if on:
+        _write_text_atomic(path, repr(time.time()))
+    else:
+        path.unlink(missing_ok=True)
+
+
+def following(session_id: str, touch: bool = False) -> bool:
+    """touch: refresh the flag, so cleanup() keeps it while the session is in use."""
+    if not _is_safe(session_id):
+        return False
+    path = _path(f"follow-{session_id}.flag")
+    try:
+        if touch:
+            os.utime(path)
+        return path.is_file()
+    except OSError:
+        return False
 
 
 def _read_time(name: str) -> float:
