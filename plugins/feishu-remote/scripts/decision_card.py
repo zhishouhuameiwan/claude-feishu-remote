@@ -204,6 +204,10 @@ def approval_card(rid: str, info: dict[str, Any]) -> dict[str, Any]:
         elements.append(_text(f"Claude 的说明（仅供参考）：{limit_text(str(info['description']), 300)}"))
     if info.get("complete", True):
         elements.append(_button("允许", {"rid": rid, "kind": "allow"}, True))
+        if info.get("always"):
+            elements.append(_text("“始终允许”会在本会话里加入下面的规则（只在这个会话有效，不写进设置文件）：\n"
+                                  + "\n".join(f"· {line}" for line in info["always"])))
+            elements.append(_button("允许，并在本会话始终允许同类操作", {"rid": rid, "kind": "always"}, False))
     else:
         elements.append(_text("参数太长，卡片里只显示了一部分。为安全起见这里不能允许，只能拒绝；要允许请回电脑上处理。"))
     deny = _button("拒绝", {"rid": rid, "kind": "deny"}, False)

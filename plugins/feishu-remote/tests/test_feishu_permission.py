@@ -525,6 +525,88 @@ check(rid is not None and RB.get_outcome(rid) is None
 click("ou_me", {"rid": rid, "kind": "allow"})
 check(p.wait(15) == 0 and (decision_of(p) or {}).get("behavior") == "allow", "  answered later: allow delivered")
 
+print("== 本会话始终允许: Claude Code's own suggestions, for this session only")
+SUGG = [{"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "npm test:*"}], "behavior": "allow",
+         "destination": "localSettings"},
+        {"type": "addDirectories", "directories": [r"E:\Work\Other"], "destination": "projectSettings"},
+        {"type": "setMode", "mode": "acceptEdits", "destination": "session"},
+        {"type": "addRules", "rules": [{"toolName": "Bash", "ruleContent": "rm:*"}], "behavior": "deny",
+         "destination": "session"}]
+NPM = {"command": "npm test", "description": "跑测试"}
+usable = CP.session_permissions({"permission_suggestions": SUGG})
+check(usable == [{**SUGG[0], "destination": "session"}, {**SUGG[1], "destination": "session"}],
+      f"  allow rules and directories kept, destination forced to session; setMode (no effect) and deny dropped: {usable}")
+check(CP.session_permissions({"permission_suggestions": "x"}) == [] and CP.session_permissions({}) == []
+      and CP.session_permissions({"permission_suggestions": [{"type": "addRules", "rules": "x", "behavior": "allow"}]}) == [],
+      "  malformed suggestions -> nothing offered")
+info = CP.build_info({"tool_name": "Bash", "tool_input": NPM, "cwd": "C:\\", "permission_suggestions": SUGG})
+check(info["always"] == ["Bash(npm test:*)", "可访问的目录：E:\\Work\\Other"], f"  the card says exactly what is added: {info['always']}")
+flat = json.dumps(DC.approval_card("r", info), ensure_ascii=False)
+check('"kind": "always"' in flat and "Bash(npm test:*)" in flat and "本会话" in flat, "  ... with its own button")
+info = CP.build_info({"tool_name": "Bash", "tool_input": NPM, "cwd": "C:\\"})
+check(not info["always"] and '"always"' not in json.dumps(DC.approval_card("r", info)), "  no suggestions -> no button")
+
+
+def rules_of(*contents):
+    return {"type": "addRules", "behavior": "allow", "destination": "localSettings",
+            "rules": [{"toolName": "Bash", "ruleContent": c} for c in contents]}
+
+
+many = {"permission_suggestions": [rules_of(*[f"cmd{n}:*" for n in range(CP.MAX_ALWAYS + 1)])]}
+check(CP.session_permissions(many) == [], "  more rules than the card can list (one suggestion holding many) -> not offered")
+check(CP.session_permissions({"permission_suggestions": [rules_of("x" * (CP.ALWAYS_LINE_CHARS + 1))]}) == [],
+      "  a rule too long to show in full -> not offered")
+odd = {"permission_suggestions": [
+    {**rules_of("ok:*"), "extra": "kept?", "rules": [{"toolName": "Bash", "ruleContent": "ok:*", "more": 1}]},
+    {"type": "addRules", "behavior": "allow", "rules": [{"toolName": "Bash", "ruleContent": {"x": 1}}]},
+    {"type": "addRules", "behavior": "allow", "rules": [{"toolName": "  "}]},
+    {"type": "addDirectories", "directories": ["  "]}]}
+check(CP.session_permissions(odd) == [{"type": "addRules", "behavior": "allow", "destination": "session",
+                                       "rules": [{"toolName": "Bash", "ruleContent": "ok:*"}]}],
+      f"  rebuilt from known fields only; non-string content and blank names dropped: {CP.session_permissions(odd)}")
+whole = CP.session_permissions({"permission_suggestions": [{"type": "addRules", "behavior": "allow",
+                                                            "rules": [{"toolName": "WebFetch"}]}]})
+check(whole == [{"type": "addRules", "behavior": "allow", "destination": "session", "rules": [{"toolName": "WebFetch"}]}]
+      and CP.describe_permissions(whole) == ["WebFetch（整个工具：它的所有调用）"],
+      "  a rule for a whole tool says so on the card")
+check(json.loads(CP.decision_output({"choice": "always"}, []))["hookSpecificOutput"]["decision"] == {"behavior": "allow"},
+      "  'always' with nothing to add is a plain allow (the listener does not offer it then)")
+long_rules = [rules_of(*["\"\\字" * 95 for _ in range(CP.MAX_ALWAYS)])]
+wide = {f"k{n}": "\"\\参" * 300 for n in range(40)}
+info = CP.build_info({"tool_name": "mcp__x__y", "tool_input": wide, "cwd": "C:\\", "permission_suggestions": long_rules})
+info = {**info, "complete": True,
+        "always": CP.describe_permissions(CP.session_permissions({"permission_suggestions": long_rules}))}
+size = request_body_bytes(DC.approval_card("r", info))
+check(len(info["always"]) == CP.MAX_ALWAYS and size < 30000,
+      f"  full parameters plus the most and longest rules: request {size} bytes")
+info = CP.build_info({"tool_name": "Bash", "tool_input": {"command": "x" * 3000}, "cwd": "C:\\",
+                      "permission_suggestions": SUGG})
+check(not info["complete"] and '"always"' not in json.dumps(DC.approval_card("r", info)),
+      "  parameters cut -> no 'always' either")
+t = new_transcript("always", tool_use_entry("al1", "Bash", NPM))
+p = start("s-always", t, inp=NPM, extra={"permission_suggestions": SUGG})
+rid = perm_rid("s-always")
+r = click("ou_me", {"rid": rid, "kind": "always",
+                    "rules": [{"type": "addRules", "rules": [{"toolName": "Bash"}], "behavior": "allow"}]})
+check(r["toast"]["type"] == "success" and "始终允许：Bash(npm test:*)" in json.dumps(r, ensure_ascii=False),
+      "  owner chose 'always'; the closed card lists what was added")
+check(p.wait(15) == 0 and decision_of(p) == {"behavior": "allow", "updatedPermissions": usable},
+      "  allow + exactly the hook's own suggestions; anything a tampered click carries is ignored")
+t = new_transcript("always2", tool_use_entry("al2", "Bash", {"command": "x" * 3000}))
+p = start("s-always2", t, inp={"command": "x" * 3000}, extra={"permission_suggestions": SUGG})
+rid = perm_rid("s-always2")
+r = click("ou_me", {"rid": rid, "kind": "always"})
+check(r["toast"]["type"] == "error" and RB.get_outcome(rid) is None, "  'always' on a cut card is refused")
+click("ou_me", {"rid": rid, "kind": "deny"})
+p.wait(15)
+t = new_transcript("always3", tool_use_entry("al3", "Bash", NPM))
+p = start("s-always3", t, inp=NPM)
+rid = perm_rid("s-always3")
+r = click("ou_me", {"rid": rid, "kind": "always"})
+check(r["toast"]["type"] == "error" and RB.get_outcome(rid) is None, "  'always' when nothing was offered is refused")
+click("ou_me", {"rid": rid, "kind": "deny"})
+p.wait(15)
+
 print()
 print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILURE(S)")
 sys.exit(1 if FAILS else 0)

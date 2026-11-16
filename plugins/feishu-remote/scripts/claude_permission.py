@@ -215,6 +215,65 @@ def _request_bytes(text: str) -> int:
     return len(json.dumps(once, ensure_ascii=False).encode("utf-8", "replace"))
 
 
+# "本会话始终允许同类操作" offers only these kinds of Claude Code's own suggestions
+# (permission_suggestions), always with destination "session". Measured 2026-11-16 in
+# a desktop session: addRules and addDirectories take effect, setMode does not.
+MAX_ALWAYS = 5  # lines on the card: rules and directories together
+ALWAYS_LINE_CHARS = 300
+
+
+def _text_value(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _rebuilt(suggestion: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """One suggestion rebuilt from its known fields only, for this session; None if it
+    is not an allow rule or directory list in the expected shape."""
+    kind = suggestion.get("type")
+    if kind == "addDirectories":
+        directories = suggestion.get("directories")
+        if not isinstance(directories, list) or not directories or not all(map(_text_value, directories)):
+            return None
+        return {"type": kind, "directories": list(directories), "destination": "session"}
+    rules = suggestion.get("rules")
+    if kind != "addRules" or suggestion.get("behavior") != "allow" or not isinstance(rules, list) or not rules:
+        return None
+    rebuilt_rules = []
+    for rule in rules:
+        rule = _as_dict(rule)
+        content = rule.get("ruleContent")
+        if not _text_value(rule.get("toolName")) or not (content is None or isinstance(content, str)):
+            return None
+        rebuilt_rules.append({"toolName": rule["toolName"], **({"ruleContent": content} if content else {})})
+    return {"type": kind, "rules": rebuilt_rules, "behavior": "allow", "destination": "session"}
+
+
+def describe_permissions(permissions: list[dict[str, Any]]) -> list[str]:
+    """What "始终允许" adds, one line each, written the way Claude Code writes rules."""
+    lines = []
+    for permission in permissions:
+        if permission["type"] == "addRules":
+            lines += [f"{r['toolName']}({r['ruleContent']})" if r.get("ruleContent")
+                      else f"{r['toolName']}（整个工具：它的所有调用）" for r in permission["rules"]]
+        else:
+            lines += [f"可访问的目录：{directory}" for directory in permission["directories"]]
+    return lines
+
+
+def session_permissions(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """What "始终允许" applies: Claude Code's own allow rules and directories, each
+    forced to this session (never a settings file), rebuilt from the hook's own
+    payload, so nothing a card click carries can add to them. Offered only when the
+    card can show every one of them in full: what is shown is exactly what is added."""
+    suggestions = payload.get("permission_suggestions")
+    usable = [p for p in (_rebuilt(_as_dict(s)) for s in (suggestions if isinstance(suggestions, list) else []))
+              if p is not None]
+    lines = describe_permissions(usable)
+    if len(lines) > MAX_ALWAYS or any(len(line) > ALWAYS_LINE_CHARS for line in lines):
+        return []
+    return usable
+
+
 def build_info(payload: dict[str, Any]) -> dict[str, Any]:
     """Card content. 'params' lists every tool parameter (for Bash-like tools all
     but the model's own description); 'complete' is False when anything was cut."""
@@ -248,6 +307,8 @@ def build_info(payload: dict[str, Any]) -> dict[str, Any]:
         "description": str(tool_input.get("description") or "") if summary_only else "",
         "params": "\n".join(params),
         "complete": complete,
+        # Offered only when every parameter is shown, like Allow itself.
+        "always": describe_permissions(session_permissions(payload)) if complete else [],
     }
 
 
@@ -255,9 +316,12 @@ STOP_MESSAGE = ("用户在飞书上叫停了这一轮，这次操作没有执行
                 "只停这一轮，之后用户在电脑上或飞书上发来的新指令照常处理。")
 
 
-def decision_output(outcome: dict[str, Any]) -> bytes:
+def decision_output(outcome: dict[str, Any], permissions: Optional[list[dict[str, Any]]] = None) -> bytes:
+    """permissions: session_permissions() of this prompt, applied when the user chose "always"."""
     if outcome.get("choice") == "allow":
         decision: dict[str, Any] = {"behavior": "allow"}
+    elif outcome.get("choice") == "always":
+        decision = {"behavior": "allow", **({"updatedPermissions": permissions} if permissions else {})}
     elif outcome.get("choice") == "stop":
         # No "interrupt": an interrupted turn fires no Stop hook (measured 2026-11-16), so
         # the session would stop taking Feishu commands. The listener also leaves a stop
@@ -393,7 +457,8 @@ def run(payload: dict[str, Any], started_at: float) -> int:
     outcome = wait_for_outcome(rid, watch, started_at, parent, subagent)
     if outcome.get("kind") == "answer":
         output = (answer_output(_as_dict(payload.get("tool_input")), outcome)
-                  if asking and outcome.get("choice") != "stop" else decision_output(outcome))
+                  if asking and outcome.get("choice") != "stop"
+                  else decision_output(outcome, session_permissions(payload)))
         sys.stdout.buffer.write(output)
         sys.stdout.flush()
         return 0
