@@ -3,7 +3,7 @@
 # (see _testenv.py), so a running listener and real requests are left alone.
 # ask / permission / reply import the listener and need lark-oapi: they use
 # $env:FEISHU_TEST_PYTHON, or else the listener's venv that setup.ps1 created.
-# content, sessions, view and control run with the system python, as the real hooks do.
+# content, sessions, view, control and subsession run with the system python, as the real hooks do.
 # Usage: powershell -ExecutionPolicy Bypass -File run_tests.ps1   (about 6 minutes; exit code = failed suites)
 
 $env:PYTHONIOENCODING = 'utf-8'
@@ -18,7 +18,8 @@ $suites = @(
     @('python', 'test_feishu_content.py'),
     @('python', 'test_feishu_sessions.py'),
     @('python', 'test_feishu_view.py'),
-    @('python', 'test_feishu_control.py')
+    @('python', 'test_feishu_control.py'),
+    @('python', 'test_feishu_subsession.py')
 )
 $failed = 0
 foreach ($suite in $suites) {

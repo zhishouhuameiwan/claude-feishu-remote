@@ -92,7 +92,8 @@ check(all(h["command"] == "python" and h["args"][0].startswith("${CLAUDE_PLUGIN_
           and os.path.isfile(os.path.join(HOOK_DIR, h["args"][0].rsplit("/", 1)[1])) for _, h in all_hooks),
       "hooks.json: every hook runs an existing script under ${CLAUDE_PLUGIN_ROOT}/scripts with python")
 check({ev for ev, _ in all_hooks} == {"SessionStart", "PermissionRequest", "Notification", "PreToolUse",
-                                     "UserPromptSubmit", "Stop", "StopFailure"}, "hooks.json: the expected events")
+                                     "PostToolUse", "UserPromptSubmit", "Stop", "StopFailure"},
+      "hooks.json: the expected events")
 pre = {g["matcher"]: g["hooks"][0] for g in settings["hooks"]["PreToolUse"]}
 check(pre[WRAP]["args"][0].endswith("claude_decision.py") and pre[WRAP].get("asyncRewake") is True,
       "settings: wrap_up -> claude_decision.py with asyncRewake")

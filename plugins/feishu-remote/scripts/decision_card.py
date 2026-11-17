@@ -96,6 +96,10 @@ def question_card(rid: str, info: dict[str, Any]) -> dict[str, Any]:
 APPROVAL_HEADER = "Claude Code · 等你审批"
 DECISION_HEADER = "Claude Code · 等你决策"
 ASK_HEADER = "Claude Code · 等你回答"
+# The desktop app's sub-session tool (claude_subsession.py): its approval card, and
+# the notice that a proposal is waiting at the computer.
+SUBSESSION_HEADER = "Claude Code · 申请开子会话"
+PROPOSAL_HEADER = "Claude Code · 提议开子会话"
 
 
 # Display caps for question cards: four questions of four options stay well under
@@ -195,11 +199,14 @@ def _free_text_form(rid: str, placeholder: str, submit: str) -> dict[str, Any]:
 
 def approval_card(rid: str, info: dict[str, Any]) -> dict[str, Any]:
     """info: title, cwd, tool, params (every parameter, already size-bounded),
-    description (the model's own words), complete (False: params were cut).
-    The parameters are what gets approved, so they come first and in full;
+    description (the model's own words), complete (False: params were cut);
+    optionally header (instead of APPROVAL_HEADER) and summary (lines saying in
+    plain words what is asked, shown above the parameters).
+    The parameters are what gets approved, so they are shown in full;
     when they could not be shown in full, Allow is not offered."""
-    elements = _intro(info) + [_text(f"工具：{info.get('tool', '')}"),
-                               _text(f"参数（批准的就是这些）：\n{info.get('params') or '（无）'}")]
+    elements = (_intro(info) + [_text(str(line)) for line in info.get("summary") or []]
+                + [_text(f"工具：{info.get('tool', '')}"),
+                   _text(f"参数（批准的就是这些）：\n{info.get('params') or '（无）'}")])
     if info.get("description"):
         elements.append(_text(f"Claude 的说明（仅供参考）：{limit_text(str(info['description']), 300)}"))
     if info.get("complete", True):
@@ -233,7 +240,19 @@ def approval_card(rid: str, info: dict[str, Any]) -> dict[str, Any]:
             },
         ],
     })
-    return _card(APPROVAL_HEADER, info.get("title", ""), "red", elements)
+    return _card(info.get("header") or APPROVAL_HEADER, info.get("title", ""), "red", elements)
+
+
+def proposal_card(info: dict[str, Any]) -> dict[str, Any]:
+    """Notice that Claude proposed a sub-session (claude_subsession.py). info: title (of
+    the proposing session), cwd, subsession (its title), task and status (both already
+    size-bounded). No buttons: the desktop app starts a proposal only from its own card.
+    The status line comes before the task, which is the model's own text."""
+    elements = _intro(info) + [_text(f"子会话：{info.get('subsession', '')}"),
+                               _text(f"▶ {info.get('status', '')}")]
+    if info.get("task"):
+        elements.append(_text(f"Claude 写的任务说明：\n{info['task']}"))
+    return _card(PROPOSAL_HEADER, info.get("title", ""), "blue", elements)
 
 
 SESSIONS_HEADER = "Claude Code · 活跃会话"

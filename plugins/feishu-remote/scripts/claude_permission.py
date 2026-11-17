@@ -43,6 +43,7 @@ import time
 from typing import Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import claude_subsession
 import decision_card
 import feishu_notify
 import reply_bridge
@@ -299,8 +300,11 @@ def build_info(payload: dict[str, Any]) -> dict[str, Any]:
     if omitted:
         complete = False
         params.append(f"（还有 {omitted} 个参数卡片放不下，已省略）")
+    # A sub-session request says what it is in plain words; its parameters stay as they are.
+    subsession = tool_name == claude_subsession.TOOL
     return {
-        "header": decision_card.APPROVAL_HEADER,
+        "header": decision_card.SUBSESSION_HEADER if subsession else decision_card.APPROVAL_HEADER,
+        "summary": claude_subsession.summary_lines(tool_input) if subsession else [],
         "title": session_title(str(payload.get("transcript_path") or "")),
         "cwd": str(payload.get("cwd") or ""),
         "tool": tool_name,

@@ -258,13 +258,15 @@ def redirect_verdict(tool_use_id: str) -> Optional[str]:
         return None
 
 
-def mark_redirected(session_id: str, ask: str) -> None:
-    _write_json_atomic(_path(f"session-{_safe(session_id)}.redirect.json"), {"at": time.time(), "ask": ask})
+def mark_redirected(session_id: str, ask: str, name: str = "redirect") -> None:
+    """name: one record per kind of redirect ("redirect": the next-step box;
+    "offer_redirect": a sub-session offer), so they do not overwrite each other."""
+    _write_json_atomic(_path(f"session-{_safe(session_id)}.{_safe(name)}.json"), {"at": time.time(), "ask": ask})
 
 
-def redirected_recently(session_id: str, ask: str, within: float) -> bool:
+def redirected_recently(session_id: str, ask: str, within: float, name: str = "redirect") -> bool:
     """This very question of this session was redirected less than `within` seconds ago."""
-    last = _read_json(_path(f"session-{_safe(session_id)}.redirect.json")) or {}
+    last = _read_json(_path(f"session-{_safe(session_id)}.{_safe(name)}.json")) or {}
     try:
         age = time.time() - float(last.get("at", 0))
     except (TypeError, ValueError):
