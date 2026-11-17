@@ -1,6 +1,6 @@
 {
   "name": "feishu-remote",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "在飞书上审批、查看和控制 Claude Code：审批弹窗、AskUserQuestion、需要拍板的“下一步”框都会推送飞书卡片，点卡片就能远程作答；还能查看会话在做什么、收完成通知、叫停正在跑的一轮、给会话发指令（仅 Windows）。",
   "author": {
     "name": "feishu-remote"
