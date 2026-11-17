@@ -255,7 +255,7 @@ check("own_initiative" in text and "新任务" in text and "回电脑" in text,
       "  own_initiative: allowing only creates the card that is started at the computer")
 check(all(f"{key}：" in text for key in OWN) and OWN["prompt"] in text and info["complete"],
       "  every parameter is still shown in full")
-check(buttons(card)[:2] == ["允许", "拒绝"], f"  Allow and Deny: {buttons(card)}")
+check(buttons(card)[:3] == ["允许", "直接开始", "拒绝"], f"  Allow, start now and Deny: {buttons(card)}")
 check(D.result_card(info, "已在飞书允许", "green")["header"]["title"]["content"] == "Claude Code · 申请开子会话",
       "  the closed card keeps the header")
 print(text)

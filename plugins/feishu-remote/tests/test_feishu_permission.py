@@ -106,7 +106,10 @@ def perm_rid(session, timeout=15):
     end = time.time() + timeout
     while time.time() < end:
         for f in glob.glob(os.path.join(os.environ["FEISHU_REPLY_DIR"], "*.pending.json")):
-            d = json.load(open(f, encoding="utf-8"))
+            try:
+                d = json.load(open(f, encoding="utf-8"))
+            except (OSError, ValueError):  # the hook is replacing this file right now: next round
+                continue
             if d.get("session_id") == session and d.get("type") == "permission" and d.get("message_id"):
                 return d["rid"]
         time.sleep(0.2)
@@ -606,6 +609,54 @@ r = click("ou_me", {"rid": rid, "kind": "always"})
 check(r["toast"]["type"] == "error" and RB.get_outcome(rid) is None, "  'always' when nothing was offered is refused")
 click("ou_me", {"rid": rid, "kind": "deny"})
 p.wait(15)
+
+print("== a proposed sub-session: '直接开始' sends Claude back to ask for a start")
+SUB = "mcp__ccd_session__start_session"
+PROP = {"initiation": "own_initiative", "title": "修界面越界", "context": "fresh", "prompt": "改三个控件。",
+        "background": "上一批改动还没提交。"}
+
+
+def card_buttons(session):
+    card = [c for c in calls() if c["kind"] == "send_card"][-1]["card"]
+    return [e["text"]["content"] for e in card["body"]["elements"] if e.get("tag") == "button"]
+
+
+t = new_transcript("sn1", tool_use_entry("sn1", SUB, PROP))
+p = start("s-sn1", t, tool=SUB, inp=PROP)
+rid = perm_rid("s-sn1")
+check(card_buttons("s-sn1")[:3] == ["允许", "直接开始", "拒绝"], f"  the card offers it: {card_buttons('s-sn1')}")
+r = click("ou_me", {"rid": rid, "kind": "start_now"})
+check(r["toast"]["type"] == "success" and "直接开始" in json.dumps(r, ensure_ascii=False), "  owner tapped it")
+d = decision_of(p) if p.wait(15) == 0 else None
+check(d is not None and d["behavior"] == "deny" and "updatedInput" not in d
+      and all(w in d["message"] for w in ("不是拒绝", "直接开始", "user_asked", "own_initiative")),
+      f"  the call is denied with the instruction to call again as user_asked: {d}")
+check(not d["message"].startswith("用户在飞书上拒绝了这次操作"), "  ... and it does not read as the user's refusal")
+t = new_transcript("sn2", tool_use_entry("sn2", SUB, PROP))
+p = start("s-sn1", t, tool=SUB, inp=PROP)
+rid = perm_rid_new = None
+for _ in range(60):
+    found = [json.load(open(f, encoding="utf-8")) for f in glob.glob(os.path.join(os.environ["FEISHU_REPLY_DIR"], "*.pending.json"))]
+    open_ones = [d2["rid"] for d2 in found if d2.get("session_id") == "s-sn1" and d2.get("message_id") and RB.get_outcome(d2["rid"]) is None]
+    if open_ones:
+        rid = open_ones[0]
+        break
+    time.sleep(0.25)
+check(rid is not None and "直接开始" not in card_buttons("s-sn1")
+      and "刚才已经点过" in json.dumps(RB.get_request(rid)["info"], ensure_ascii=False),
+      "  the same proposal again right after: no second '直接开始', and the card says why")
+r = click("ou_me", {"rid": rid, "kind": "start_now"})
+check(r["toast"]["type"] == "error" and RB.get_outcome(rid) is None, "  a forged 'start_now' on that card is refused")
+click("ou_me", {"rid": rid, "kind": "allow"})
+check(p.wait(15) == 0 and decision_of(p) == {"behavior": "allow"}, "  Allow still works there")
+for name, inp in (("user_asked", {**PROP, "initiation": "user_asked"}), ("proposal_id", {"proposal_id": "task_1"}),
+                  ("a proposal carrying a proposal_id", {**PROP, "proposal_id": "task_1"}),
+                  ("parameters cut", {**PROP, "prompt": "x" * 3000})):
+    info = CP.build_info({"tool_name": SUB, "tool_input": inp, "session_id": "s-sn3", "cwd": "E:\\x"})
+    check(not info.get("start_now") and '"start_now"' not in json.dumps(DC.approval_card("r", info)),
+          f"  {name}: not offered")
+info = CP.build_info({"tool_name": "Bash", "tool_input": CMD, "session_id": "s-sn3"})
+check(not info.get("start_now"), "  other tools: not offered")
 
 print()
 print("ALL PASS" if not FAILS else f"{len(FAILS)} FAILURE(S)")

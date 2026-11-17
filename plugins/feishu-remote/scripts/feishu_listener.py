@@ -267,7 +267,8 @@ def refresh_sessions(message_id: str) -> None:
 def _closed_card(request: dict[str, Any], outcome: dict[str, Any]) -> dict[str, Any]:
     info = request.get("info", {})
     if outcome.get("kind") == "answer":
-        answer = {"allow": "允许", "deny": "拒绝", "always": "允许并在本会话始终允许", "stop": "叫停"}.get(
+        answer = {"allow": "允许", "deny": "拒绝", "always": "允许并在本会话始终允许", "stop": "叫停",
+                  "start_now": "直接开始"}.get(
             outcome.get("choice", ""), "") \
             if request.get("type") == "permission" else ""
         answer = answer or outcome.get("choice") or outcome.get("text") or ""
@@ -597,6 +598,10 @@ def _permission_answer(request: dict[str, Any], value: dict[str, Any],
         if not request.get("info", {}).get("complete", True) or not always:
             return "这张卡片没有提供“始终允许”"
         return "always", "", f"已在飞书允许，并在本会话始终允许：{short('、'.join(always), 120)}{note}", "green"
+    if kind == "start_now":
+        if not request.get("info", {}).get("complete", True) or not request.get("info", {}).get("start_now"):
+            return "这张卡片没有提供“直接开始”"
+        return "start_now", "", f"已在飞书选择直接开始：Claude 会重新申请一次，请再点一次“允许”{note}", "green"
     if kind == "deny":
         return "deny", "", f"已在飞书拒绝{note}", "red"
     if kind == "text":

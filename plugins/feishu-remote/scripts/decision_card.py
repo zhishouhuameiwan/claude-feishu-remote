@@ -211,6 +211,10 @@ def approval_card(rid: str, info: dict[str, Any]) -> dict[str, Any]:
         elements.append(_text(f"Claude 的说明（仅供参考）：{limit_text(str(info['description']), 300)}"))
     if info.get("complete", True):
         elements.append(_button("允许", {"rid": rid, "kind": "allow"}, True))
+        if info.get("start_now"):
+            elements.append(_text("“直接开始”不生成卡片：让 Claude 改成按你的要求开始，重新申请一次，"
+                                  "你再点一次“允许”，子会话就开始。只在你在电脑上发起的那一轮有效。"))
+            elements.append(_button("直接开始", {"rid": rid, "kind": "start_now"}, False))
         if info.get("always"):
             elements.append(_text("“始终允许”会在本会话里加入下面的规则（只在这个会话有效，不写进设置文件）：\n"
                                   + "\n".join(f"· {line}" for line in info["always"])))

@@ -275,6 +275,32 @@ def session_permissions(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return usable
 
 
+# "直接开始" on the card of a proposed sub-session. A hook cannot change the call
+# (claude_subsession.py), so the call is denied and Claude is told to make it again as
+# "user_asked", which the desktop app starts once it is allowed, in a turn the user
+# began at the computer. In any other turn the app refuses it and Claude proposes
+# again: that card, within START_NOW_SECONDS, does not offer the button a second time.
+START_NOW_NAME = "start_now"
+START_NOW_SECONDS = 600
+START_NOW_MESSAGE = (
+    "这不是拒绝：用户在飞书上点了“直接开始”，要求现在就开始这个子会话，而不是只留一张提议卡片"
+    "（这条消息由用户的本地钩子通过审批通道给出，见会话开头注入的“飞书远程回复规则”）。"
+    "请把这次调用原样重发一次，只把 initiation 改成 \"user_asked\"。如果桌面端拒绝直接开始"
+    "（这一轮不是用户在电脑上发起的），不要再试：改回 \"own_initiative\" 提议，并告诉用户要回电脑上点卡片开始。"
+)
+
+
+def _proposal_key(payload: dict[str, Any]) -> tuple[str, str]:
+    title = str(_as_dict(payload.get("tool_input")).get("title") or "").strip()
+    return str(payload.get("session_id") or ""), title
+
+
+def _start_now_tried(payload: dict[str, Any]) -> bool:
+    session_id, title = _proposal_key(payload)
+    return reply_bridge.valid_id(session_id) and reply_bridge.redirected_recently(
+        session_id, title, START_NOW_SECONDS, name=START_NOW_NAME)
+
+
 def build_info(payload: dict[str, Any]) -> dict[str, Any]:
     """Card content. 'params' lists every tool parameter (for Bash-like tools all
     but the model's own description); 'complete' is False when anything was cut."""
@@ -302,9 +328,19 @@ def build_info(payload: dict[str, Any]) -> dict[str, Any]:
         params.append(f"（还有 {omitted} 个参数卡片放不下，已省略）")
     # A sub-session request says what it is in plain words; its parameters stay as they are.
     subsession = tool_name == claude_subsession.TOOL
+    summary = claude_subsession.summary_lines(tool_input) if subsession else []
+    # "直接开始" on a plain proposal, offered like Allow only when every parameter is shown.
+    start_now = False
+    if (subsession and complete and tool_input.get("initiation") == "own_initiative"
+            and not tool_input.get("proposal_id")):
+        start_now = not _start_now_tried(payload)
+        if not start_now:
+            summary = summary + ["刚才已经点过“直接开始”，这次不再提供：如果子会话没有开起来，"
+                                 "多半是这一轮不是你在电脑上发起的，只能允许生成卡片，再回电脑点“开始”。"]
     return {
         "header": decision_card.SUBSESSION_HEADER if subsession else decision_card.APPROVAL_HEADER,
-        "summary": claude_subsession.summary_lines(tool_input) if subsession else [],
+        "summary": summary,
+        "start_now": start_now,
         "title": session_title(str(payload.get("transcript_path") or "")),
         "cwd": str(payload.get("cwd") or ""),
         "tool": tool_name,
@@ -326,6 +362,8 @@ def decision_output(outcome: dict[str, Any], permissions: Optional[list[dict[str
         decision: dict[str, Any] = {"behavior": "allow"}
     elif outcome.get("choice") == "always":
         decision = {"behavior": "allow", **({"updatedPermissions": permissions} if permissions else {})}
+    elif outcome.get("choice") == "start_now":
+        decision = {"behavior": "deny", "message": START_NOW_MESSAGE}
     elif outcome.get("choice") == "stop":
         # No "interrupt": an interrupted turn fires no Stop hook (measured 2026-11-16), so
         # the session would stop taking Feishu commands. The listener also leaves a stop
@@ -460,6 +498,11 @@ def run(payload: dict[str, Any], started_at: float) -> int:
 
     outcome = wait_for_outcome(rid, watch, started_at, parent, subagent)
     if outcome.get("kind") == "answer":
+        if outcome.get("choice") == "start_now" and reply_bridge.valid_id(base["session_id"]):
+            try:
+                reply_bridge.mark_redirected(*_proposal_key(payload), name=START_NOW_NAME)
+            except (OSError, ValueError) as exc:  # the record only saves a second offer; the tap must not be lost
+                log(f"[Feishu] could not record the start-now tap: {exc}")
         output = (answer_output(_as_dict(payload.get("tool_input")), outcome)
                   if asking and outcome.get("choice") != "stop"
                   else decision_output(outcome, session_permissions(payload)))
